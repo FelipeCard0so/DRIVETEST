@@ -35,6 +35,7 @@ BASE_4G_PATH    = BASE_DIR / "Base_4G.xlsx"
 CREDS_PATH      = BASE_DIR / "credentials.json"
 SHEET_ID        = "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE"
 GITHUB_TOKEN_PATH = BASE_DIR / "github_token.txt"
+HOTEIS_PATH       = BASE_DIR / "HOTEIS.xlsx"
 
 # Status da planilha
 ST_CONCLUIDO    = "✓ Atividade concluída"
@@ -681,55 +682,231 @@ def determinar_ponto_inicio(df_sheets):
 
 
 # ============================================================
-# LEITURA DAS NOVAS ATIVIDADES (Felipe_*.xlsx)
+# LEITURA DAS NOVAS ATIVIDADES
 # ============================================================
 
-def encontrar_arquivo_felipe():
+# Mapeamento de campos internos para variações de nome de coluna
+# Adicione aqui novos sinônimos se seu chefe mudar algum nome
+_MAPA_COLUNAS = {
+    "SITE":        ["SITE", "SITES", "SITE_ID", "COD_SITE", "NOME_SITE", "CODIGO"],
+    "CIDADE":      ["CIDADE", "MUNICIPIO", "CITY", "LOCALIDADE"],
+    "UF":          ["UF", "ESTADO", "STATE", "REGIONAL", "UF_SITE"],
+    "LATITUDE":    ["LATITUDE", "LAT", "LATIT"],       # espaços removidos na normalização
+    "LONGITUDE":   ["LONGITUDE", "LON", "LONG", "LONGIT"],
+    "FREQUENCIA":  ["FREQUENCIA", "FREQUÊNCIA", "FREQ", "FREQUENCIAS", "FREQUENCY"],
+    "VENDOR":      ["VENDOR", "EQUIPE_RF", "EMPRESA_RF", "FORNECEDOR", "INTEGRADOR_RF"],
+    "INTEGRADORA": ["INTEGRADORA", "DEMANDANTE", "CLIENTE", "OPERADORA"],
+    "TECNOLOGIA":  ["TECNOLOGIA", "TEC", "TECNOLOGIAS", "TECH", "TECHNOLOGY"],
+}
+
+
+def _resolver_colunas(df_raw):
+    """
+    Normaliza os nomes de colunas do DataFrame recebido e
+    retorna um dict {campo_interno: nome_original_no_arquivo}.
+    """
+    # Normalizar: strip + upper + sem acento
+    cols_norm = {}
+    for col_orig in df_raw.columns:
+        col_n = (unicodedata.normalize("NFKD", str(col_orig).strip().upper())
+                 .encode("ascii", errors="ignore").decode("utf-8"))
+        cols_norm[col_n] = col_orig
+
+    mapeado = {}
+    nao_encontrado = []
+    for campo, candidatos in _MAPA_COLUNAS.items():
+        col_orig = next((cols_norm[c] for c in candidatos if c in cols_norm), None)
+        if col_orig:
+            mapeado[campo] = col_orig
+        else:
+            nao_encontrado.append(campo)
+
+    if nao_encontrado:
+        print(f"   ⚠️  Colunas nao encontradas: {nao_encontrado}")
+        print(f"      Colunas disponiveis: {list(df_raw.columns)}")
+
+    return mapeado
+
+
+def _limpar_uf(val):
+    """Retorna UF válida (2 letras) ou string vazia."""
+    s = str(val).strip().upper()
+    if s in ("", "NAN", "NONE", "0") or not s.isalpha():
+        return ""
+    return s if len(s) == 2 else ""
+
+
+def _limpar_cidade(val):
+    """Retorna cidade em maiúsculas ou string vazia."""
+    s = str(val).strip().upper()
+    return "" if s in ("", "NAN", "NONE") else s
+
+
+def _formatar_site_robusto(site_raw):
+    """
+    Formata código de site para padrão UF-XXX.
+    Trata sufixos como _B, _A, _C (ex: MGGCR_B → MG-GCR).
+    """
+    s = str(site_raw).strip().upper()
+    # Remover sufixo _X (letra única no final)
+    s = re.sub(r"_[A-Z]$", "", s)
+    if len(s) >= 5:
+        return f"{s[:2]}-{s[-3:]}"
+    return s
+
+
+def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
+    """
+    Converte um DataFrame bruto de qualquer planilha de atividades
+    para o formato interno do DT 3.0.
+
+    Proteções implementadas:
+    - Nomes de colunas com espaço, case, acentos, sinônimos
+    - UF = 0 ou inválida (marcada vazia para busca na Base_4G)
+    - Cidade vazia/NaN (marcada vazia para busca por coordenadas)
+    - Sufixos no código do site (_B, _A, etc.)
+    - Tecnologia ausente (NaN → string vazia, não bloqueia)
+    - Linhas sem coordenadas são descartadas com aviso
+    - Linhas sem SITE são descartadas com aviso
+    """
+    prefixo = f"   [{nome_arquivo}]" if nome_arquivo else "  "
+
+    # ── 1. Resolver colunas ─────────────────────────────────────────────
+    col = _resolver_colunas(df_raw)
+
+    def _get(campo, default=""):
+        """Retorna valor da coluna ou default se coluna não existir."""
+        if campo not in col:
+            return default
+        v = df_raw[col[campo]]
+        return v
+
+    registros = []
+    descartados = 0
+
+    for idx, row in df_raw.iterrows():
+        linha_num = idx + 2   # +2 porque idx começa em 0 e linha 1 é cabeçalho
+
+        # ── SITE — obrigatório ──────────────────────────────────────────
+        site_raw = str(row[col["SITE"]]).strip() if "SITE" in col else ""
+        if not site_raw or site_raw.upper() in ("NAN", "NONE", ""):
+            print(f"{prefixo} ⚠️  Linha {linha_num}: SITE vazio — ignorada")
+            descartados += 1
+            continue
+        site = _formatar_site_robusto(site_raw)
+
+        # ── COORDENADAS — obrigatórias ──────────────────────────────────
+        lat  = safe_float(row[col["LATITUDE"]])  if "LATITUDE"  in col else 0.0
+        lon  = safe_float(row[col["LONGITUDE"]]) if "LONGITUDE" in col else 0.0
+        if lat == 0.0 and lon == 0.0:
+            print(f"{prefixo} ⚠️  Linha {linha_num} ({site}): coordenadas zeradas — ignorada")
+            descartados += 1
+            continue
+
+        # ── UF ──────────────────────────────────────────────────────────
+        uf_raw = row[col["UF"]] if "UF" in col else ""
+        uf = _limpar_uf(uf_raw)
+        if not uf:
+            print(f"{prefixo} ℹ️  {site}: UF ausente/invalida ({repr(uf_raw)}) — sera buscada na Base_4G")
+
+        # ── CIDADE ──────────────────────────────────────────────────────
+        cidade_raw = row[col["CIDADE"]] if "CIDADE" in col else ""
+        cidade = _limpar_cidade(cidade_raw)
+        if not cidade:
+            print(f"{prefixo} ℹ️  {site}: CIDADE vazia — sera buscada por coordenadas")
+
+        # ── TECNOLOGIA — opcional ───────────────────────────────────────
+        tec_raw = row[col["TECNOLOGIA"]] if "TECNOLOGIA" in col else ""
+        tec = "" if pd.isna(tec_raw) else str(tec_raw).strip()
+
+        # ── FREQUÊNCIA ──────────────────────────────────────────────────
+        freq_raw = row[col["FREQUENCIA"]] if "FREQUENCIA" in col else ""
+        if pd.isna(freq_raw) or str(freq_raw).strip().upper() in ("NAN", "NONE", ""):
+            freq_234, freq_5g = "", ""
+        else:
+            freq_234, freq_5g = normalizar_frequencia(str(freq_raw).strip())
+
+        # ── DEMANDA / VENDOR ────────────────────────────────────────────
+        def _s(campo):
+            if campo not in col: return ""
+            v = row[col[campo]]
+            return "" if pd.isna(v) else str(v).strip()
+
+        registros.append({
+            "DEMANDA":    _s("INTEGRADORA"),
+            "INTEGRAÇÃO": _s("VENDOR"),
+            "SITE":       site,
+            "UF":         uf,
+            "TEC":        tec,
+            "LAT":        lat,
+            "LONG":       lon,
+            "CIDADE":     cidade,
+            "2G|3G|4G":  freq_234,
+            "5G":         freq_5g,
+            "STATUS":     ST_NOVA,
+            "CONCLUIDO":  "",
+            "HOTEL":      "",
+        })
+
+    if descartados:
+        print(f"{prefixo} ⚠️  {descartados} linha(s) descartada(s).")
+
+    df_out = pd.DataFrame(registros)
+
+    # ── Recuperar CIDADE e UF ausentes via Base_4G ───────────────────────
+    if df_base is not None and not df_out.empty:
+        for idx, row in df_out.iterrows():
+            precisa_cidade = not row["CIDADE"]
+            precisa_uf     = not row["UF"]
+            if (precisa_cidade or precisa_uf) and row["LAT"] != 0.0:
+                try:
+                    mask = (
+                        (abs(df_base["LATITUDE"]  - row["LAT"])  <= 0.002) &
+                        (abs(df_base["LONGITUDE"] - row["LONG"]) <= 0.002)
+                    )
+                    matches = df_base[mask]
+                    if not matches.empty:
+                        m = matches.iloc[0]
+                        if precisa_cidade:
+                            df_out.at[idx, "CIDADE"] = str(m.get("CIDADE", "")).strip().upper()
+                            print(f"{prefixo} ℹ️  {row['SITE']}: CIDADE recuperada da Base_4G: {df_out.at[idx, 'CIDADE']}")
+                        if precisa_uf:
+                            df_out.at[idx, "UF"] = str(m.get("[P]UF", "")).strip().upper()
+                            print(f"{prefixo} ℹ️  {row['SITE']}: UF recuperada da Base_4G: {df_out.at[idx, 'UF']}")
+                except Exception:
+                    pass
+
+        # Avisar sobre campos ainda ausentes após todas as tentativas
+        for _, row in df_out.iterrows():
+            if not row["CIDADE"]:
+                print(f"{prefixo} ⚠️  {row['SITE']}: CIDADE nao encontrada em nenhuma fonte.")
+            if not row["UF"]:
+                print(f"{prefixo} ⚠️  {row['SITE']}: UF nao encontrada — sera solicitada no relatorio.")
+
+    return df_out
+
+
+# Manter alias para compatibilidade com chamadas existentes
+def processar_felipe(df_raw, df_base=None):
+    return processar_arquivo(df_raw, df_base=df_base)
+
+
+def encontrar_arquivos_novas():
+    """
+    Retorna lista com todos os .xlsx/.xls encontrados na pasta 'novas atividades'.
+    Independente do nome do arquivo — qualquer planilha na pasta sera processada.
+    """
     PASTA_NOVAS.mkdir(parents=True, exist_ok=True)
-    for arq in PASTA_NOVAS.iterdir():
-        nome = arq.name.lower()
-        if nome.startswith("felipe_") and arq.suffix.lower() in (".xlsx", ".xls"):
+    arquivos = [
+        arq for arq in PASTA_NOVAS.iterdir()
+        if arq.suffix.lower() in (".xlsx", ".xls") and arq.is_file()
+    ]
+    if arquivos:
+        for arq in arquivos:
             print(f"   Arquivo encontrado: {arq.name}")
-            return arq
-    return None
-
-
-def processar_felipe(df_raw):
-    """Converte o DataFrame bruto de Felipe_*.xlsx para formato interno."""
-    df = pd.DataFrame()
-
-    # Coluna INTEGRADORA pode aparecer como "INTEGRADORA" após normalização
-    df["DEMANDA"]    = df_raw.get("INTEGRADORA", pd.Series([""] * len(df_raw)))
-    df["INTEGRAÇÃO"] = df_raw.get("VENDOR",      pd.Series([""] * len(df_raw)))
-    df["SITE"]       = df_raw.get("SITE",         pd.Series([""] * len(df_raw))).apply(formatar_site)
-    df["UF"]         = df_raw.get("REGIONAL",     pd.Series([""] * len(df_raw)))
-    df["TEC"]        = df_raw.get("TECNOLOGIA",   pd.Series([""] * len(df_raw)))
-    df["CIDADE"]     = df_raw.get("CIDADE",       pd.Series([""] * len(df_raw)))
-
-    # Latitude/Longitude (podem ter espaço no nome da coluna)
-    lat_col = next((c for c in df_raw.columns if c.strip() in ("LATITUDE", "LAT")), None)
-    lon_col = next((c for c in df_raw.columns if c.strip() in ("LONGITUDE", "LONG")), None)
-    df["LAT"]  = df_raw[lat_col].apply(safe_float) if lat_col else 0.0
-    df["LONG"] = df_raw[lon_col].apply(safe_float) if lon_col else 0.0
-
-    # Frequências
-    freq_col = next(
-        (c for c in df_raw.columns if c in ("FREQUENCIA", "FREQUÊNCIA")), None
-    )
-    if freq_col:
-        parsed = df_raw[freq_col].apply(normalizar_frequencia)
-        df["2G|3G|4G"] = parsed.apply(lambda x: x[0])
-        df["5G"]        = parsed.apply(lambda x: x[1])
     else:
-        df["2G|3G|4G"] = ""
-        df["5G"]        = ""
-
-    df["STATUS"] = ST_NOVA
-
-    # Remover linhas sem coordenadas válidas
-    df = df[(df["LAT"] != 0.0) | (df["LONG"] != 0.0)].reset_index(drop=True)
-
-    return df
+        print("   Nenhum arquivo .xlsx encontrado na pasta 'novas atividades'.")
+    return arquivos
 
 
 # ============================================================
@@ -876,6 +1053,73 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
 # GERAÇÃO DE MAPA
 # ============================================================
 
+def carregar_hoteis():
+    """
+    Lê HOTEIS.xlsx da pasta DT 3.0 e retorna lista de dicts para o mapa.
+    Colunas esperadas: NOME | CIDADE | LATITUDE | LONGITUDE | TELEFONE | ULTIMO_VALOR
+    Se o arquivo não existir, retorna lista vazia com aviso.
+    """
+    if not HOTEIS_PATH.exists():
+        print("   ⚠️  HOTEIS.xlsx não encontrado — hoteis nao serao exibidos no mapa.")
+        print(f"      Crie o arquivo em: {HOTEIS_PATH}")
+        return []
+
+    try:
+        df = pd.read_excel(HOTEIS_PATH, engine="openpyxl")
+        df.columns = (
+            df.columns.str.strip().str.upper()
+            .str.normalize("NFKD")
+            .str.encode("ascii", errors="ignore")
+            .str.decode("utf-8")
+        )
+
+        # Aceitar variações de nome de coluna
+        col_map = {
+            "nome":     next((c for c in df.columns if "NOME" in c), None),
+            "cidade":   next((c for c in df.columns if "CIDADE" in c), None),
+            "lat":      next((c for c in df.columns if "LAT" in c), None),
+            "lon":      next((c for c in df.columns if "LON" in c or "LONG" in c), None),
+            "tel":      next((c for c in df.columns if "TEL" in c or "FONE" in c), None),
+            "valor":    next((c for c in df.columns if "VALOR" in c or "PRECO" in c or "PRECO" in c), None),
+        }
+
+        hoteis = []
+        for _, row in df.iterrows():
+            nome = str(row[col_map["nome"]]).strip() if col_map["nome"] else ""
+            if not nome or nome.upper() in ("NAN", "NONE", ""):
+                continue
+
+            lat = safe_float(row[col_map["lat"]]) if col_map["lat"] else 0.0
+            lon = safe_float(row[col_map["lon"]]) if col_map["lon"] else 0.0
+            if lat == 0.0 and lon == 0.0:
+                continue
+
+            cidade = str(row[col_map["cidade"]]).strip() if col_map["cidade"] else ""
+            tel    = str(row[col_map["tel"]]).strip()   if col_map["tel"]    else ""
+            valor  = str(row[col_map["valor"]]).strip() if col_map["valor"]  else ""
+
+            # Limpar "nan" de campos opcionais
+            cidade = "" if cidade.upper() in ("NAN", "NONE") else cidade
+            tel    = "" if tel.upper()    in ("NAN", "NONE") else tel
+            valor  = "" if valor.upper()  in ("NAN", "NONE") else valor
+
+            hoteis.append({
+                "nome":   nome,
+                "cidade": cidade,
+                "lat":    lat,
+                "lon":    lon,
+                "tel":    tel,
+                "valor":  valor,
+            })
+
+        print(f"   {len(hoteis)} hoteis carregados de HOTEIS.xlsx")
+        return hoteis
+
+    except Exception as e:
+        print(f"   ❌ Erro ao ler HOTEIS.xlsx: {e}")
+        return []
+
+
 def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
     """
     Gera MAPA_ROTAS.html com HTML/JS puro (sem folium).
@@ -891,36 +1135,8 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
     ST_CONC = "✓ Atividade concluída"
     ST_IMPR = "IMPRODUTIVO"
 
-    # Hotéis fixos do mapa original
-    hoteis = [
-        {"nome": "Pousada Trilha da Serra", "lat": -21.148313, "lon": -44.187782},
-        {"nome": "HOTEL VARGINHA II", "lat": -21.564407, "lon": -45.447234},
-        {"nome": "Pousada Três Irmãs", "lat": -21.123052, "lon": -46.613856},
-        {"nome": "Hotel Tropical", "lat": -20.918966, "lon": -46.981685},
-        {"nome": "HOTEL CALIFORNIA", "lat": -21.240752, "lon": -44.996509},
-        {"nome": "Hotel A Modelar", "lat": -22.424720, "lon": -45.467884},
-        {"nome": "POUSADA REAL", "lat": -21.064034, "lon": -43.765075},
-        {"nome": "Pousada Uriel", "lat": -20.556243, "lon": -43.817302},
-        {"nome": "Hotel Pinheiros", "lat": -20.7811, "lon": -46.3725},
-        {"nome": "Hotel Benel", "lat": -21.729474, "lon": -46.384245},
-        {"nome": "Hotel Tadini", "lat": -22.254241, "lon": -45.707182},
-        {"nome": "Hotel Ed1000.son", "lat": -21.109151, "lon": -44.234591},
-        {"nome": "Lícia Hotel", "lat": -17.747518, "lon": -46.173290},
-        {"nome": "Hotel Aranãs", "lat": -17.700463, "lon": -42.515668},
-        {"nome": "Hotel Vitória", "lat": -15.607195, "lon": -44.391290},
-        {"nome": "HOTEL SÃO PEDRO", "lat": -16.741676, "lon": -43.867252},
-        {"nome": "Hotel Pousada Maracanã", "lat": -22.235817, "lon": -45.955842},
-        {"nome": "Hotel Chácara", "lat": -19.674050, "lon": -43.253617},
-        {"nome": "Hotel Tereza", "lat": -18.768916, "lon": -44.430442},
-        {"nome": "Pousada Mineira Curvelo", "lat": -18.767471, "lon": -44.429823},
-        {"nome": "Hotel Casa Grande", "lat": -18.827937, "lon": -41.989220},
-        {"nome": "Hotel e Restaurante Lacerda", "lat": -19.314587, "lon": -42.367809},
-        {"nome": "Hotel Park Industrial Muriaé", "lat": -21.147720, "lon": -42.381629},
-        {"nome": "Pousada Onhas do Jequi", "lat": -16.179759, "lon": -40.696438},
-        {"nome": "Hotel Volpi", "lat": -16.166868, "lon": -42.302537},
-        {"nome": "Hotel Estação Norte", "lat": -21.692941, "lon": -43.431925},
-        {"nome": "Hotel Hotel Nova Aurora Igarapé", "lat": -20.07013556828675, "lon": -44.29993878108834},
-    ]
+    # Carregar hoteis da planilha HOTEIS.xlsx
+    hoteis = carregar_hoteis()
 
     # Montar pontos da rota (pendentes)
     pontos_rota = []
@@ -1098,9 +1314,19 @@ var icHotel    = mkIcon('orange', 'tower');
 // ── Hotéis ───────────────────────────────────────────────────────────────────
 var mkHoteis = [];
 HOTEIS.forEach(function(h){{
-  var mk = L.marker([h.lat,h.lon],{{icon:icHotel}})
-   .addTo(map)
-   .bindTooltip(h.nome,{{sticky:true,className:'tip-hotel',direction:'top'}});
+  var mk = L.marker([h.lat,h.lon],{{icon:icHotel}}).addTo(map);
+  mk.bindTooltip(h.nome,{{sticky:true,className:'tip-hotel',direction:'top'}});
+  mk.bindPopup(
+    "<div class='popup-box'>"+
+    "<b>"+h.nome+"</b><br>"+
+    (h.cidade ? "<b>Cidade:</b> "+h.cidade+"<br>" : "")+
+    (h.tel    ? "<b>Telefone:</b> "+h.tel+"<br>"  : "")+
+    (h.valor  ? "<b>Ultimo valor:</b> R$ "+h.valor+"<br>" : "")+
+    "<div class='popup-status' style='background:#fef3e2;color:#b7600a;margin-top:6px;"+
+    "padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;'>"+
+    "🏨 Hotel / Pousada</div>"+
+    "</div>"
+  );
   mkHoteis.push(mk);
 }});
 
@@ -1469,16 +1695,30 @@ def main():
 
     # ── 5. Novas atividades ────────────────────────────────
     print("\n[5/7] Processando novas atividades...")
-    arq_felipe = encontrar_arquivo_felipe()
-    df_novas   = pd.DataFrame()
+    arquivos_novas = encontrar_arquivos_novas()
+    df_novas       = pd.DataFrame()
 
-    if arq_felipe:
-        df_raw   = pd.read_excel(arq_felipe, engine="openpyxl")
-        df_raw   = normalizar_colunas(df_raw)
-        df_novas = processar_felipe(df_raw)
-        print(f"   {len(df_novas)} novas atividades processadas.")
+    if arquivos_novas:
+        frames_novas = []
+        for arq in arquivos_novas:
+            try:
+                df_raw = pd.read_excel(arq, engine="openpyxl")
+                df_proc = processar_arquivo(df_raw, nome_arquivo=arq.name, df_base=df_base)
+                if not df_proc.empty:
+                    frames_novas.append(df_proc)
+                    print(f"   {arq.name}: {len(df_proc)} atividades válidas.")
+                else:
+                    print(f"   ⚠️  {arq.name}: nenhuma atividade válida extraída.")
+            except Exception as e:
+                print(f"   ❌ Erro ao processar {arq.name}: {e}")
+
+        if frames_novas:
+            df_novas = pd.concat(frames_novas, ignore_index=True)
+            # Remover duplicatas de SITE caso o mesmo site apareça em dois arquivos
+            df_novas = df_novas.drop_duplicates(subset=["SITE"], keep="first")
+            print(f"   Total: {len(df_novas)} novas atividades únicas.")
     else:
-        print("   Nenhum arquivo Felipe_*.xlsx encontrado. Continuando sem novas.")
+        print("   Nenhuma nova atividade. Continuando sem novas.")
 
     # ── 6. Montar pool e otimizar ──────────────────────────
     print("\n[6/7] Otimizando rota...")
@@ -1553,13 +1793,17 @@ def main():
     print("   → Atualizando Google Sheets...")
     atualizar_sheets(ws, df_fixas, rota_final, sites_originais, df_aguardando)
 
-    # ── Mover arquivo processado ──────────────────────────
-    if arq_felipe:
+    # ── Mover arquivos processados ────────────────────────
+    if arquivos_novas:
         processados = PASTA_NOVAS / "processados"
         processados.mkdir(exist_ok=True)
-        destino = processados / arq_felipe.name
-        arq_felipe.rename(destino)
-        print(f"   Arquivo movido para: processados/{arq_felipe.name}")
+        for arq in arquivos_novas:
+            try:
+                destino = processados / arq.name
+                arq.rename(destino)
+                print(f"   Movido: processados/{arq.name}")
+            except Exception as e:
+                print(f"   ⚠️  Nao foi possivel mover {arq.name}: {e}")
 
     print("\n" + "=" * 60)
     print("  ✅ DT 3.0 concluído com sucesso!")
