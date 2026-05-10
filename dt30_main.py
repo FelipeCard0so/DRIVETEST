@@ -34,8 +34,10 @@ PASTA_OUT       = BASE_DIR / "out"
 BASE_4G_PATH    = BASE_DIR / "Base_4G.xlsx"
 CREDS_PATH      = BASE_DIR / "credentials.json"
 SHEET_ID        = "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE"
-GITHUB_TOKEN_PATH = BASE_DIR / "github_token.txt"
-HOTEIS_PATH       = BASE_DIR / "HOTEIS.xlsx"
+GITHUB_TOKEN_PATH  = BASE_DIR / "github_token.txt"
+HOTEIS_PATH        = BASE_DIR / "HOTEIS.xlsx"          # fallback local (opcional)
+HOTEIS_SHEET_ID    = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
+HOTEIS_GID         = 965678690                          # gid da aba correta
 
 # Status da planilha
 ST_CONCLUIDO    = "✓ Atividade concluída"
@@ -116,6 +118,66 @@ def formatar_site(site):
     if len(s) >= 5:
         return f"{s[:2]}-{s[-3:]}"
     return s
+
+
+# ============================================================
+# NORMALIZAÇÃO DE TECNOLOGIA (TEC)
+# ============================================================
+
+# Tabela de substituição: chave = valor bruto normalizado → valor padronizado
+# Ordem importa: mais específico primeiro (ex: LTE|NR antes de LTE)
+_MAPA_TEC = [
+    # 4 tecnologias
+    (r"^2G[|/]3G[|/]LTE[|/]NR$",  "2G|3G|4G|5G"),
+    # 3 tecnologias
+    (r"^3G[|/]LTE[|/]NR$",         "3G|4G|5G"),
+    (r"^2G[|/]3G[|/]LTE$",         "2G|3G|4G"),
+    (r"^2G[|/]3G[|/]NR$",          "2G|3G|5G"),
+    # 2 tecnologias
+    (r"^LTE[|/]NR$",               "4G|5G"),
+    (r"^3G[|/]LTE$",               "3G|4G"),
+    (r"^3G[|/]NR$",                "3G|5G"),
+    (r"^2G[|/]LTE$",               "2G|4G"),
+    # 1 tecnologia
+    (r"^LTE$",                     "4G"),
+    (r"^NR$",                      "5G"),
+]
+
+# Valores já no padrão correto — não tocar
+_TEC_PADRAO = {"2G", "3G", "4G", "5G",
+               "2G|3G", "2G|4G", "2G|5G",
+               "3G|4G", "3G|5G", "4G|5G",
+               "2G|3G|4G", "2G|3G|5G", "2G|4G|5G", "3G|4G|5G",
+               "2G|3G|4G|5G"}
+
+
+def normalizar_tec(valor):
+    """
+    Converte valores de TEC fora do padrão para o padrão DT 3.0.
+
+    Exemplos:
+      'LTE'          → '4G'
+      'LTE|NR'       → '4G|5G'
+      '3G|LTE|NR'   → '3G|4G|5G'
+      '2G|3G|LTE|NR' → '2G|3G|4G|5G'
+      '4G'           → '4G'   (já correto, sem alteração)
+      ''             → ''     (vazio, sem alteração)
+    """
+    if not valor:
+        return valor
+    s = str(valor).strip().upper()
+    if not s or s in ("NAN", "NONE"):
+        return ""
+    # Já está no padrão — retorna sem tocar
+    if s in _TEC_PADRAO:
+        return s
+    # Normalizar separadores: / → |  e remover espaços
+    s_norm = re.sub(r"\s*[/]\s*", "|", s)
+    for padrao, substituto in _MAPA_TEC:
+        if re.match(padrao, s_norm, re.IGNORECASE):
+            return substituto
+    # Não reconhecido — retorna o original sem alterar (nunca inventa)
+    return valor.strip()
 
 
 # ============================================================
@@ -498,7 +560,7 @@ def ler_atividades_sheets(ws):
             "INTEGRAÇÃO": linha[CI["INTEGRACAO"]],
             "SITE":       linha[CI["SITE"]],
             "UF":         linha[CI["UF"]],
-            "TEC":        linha[CI["TEC"]],
+            "TEC":        normalizar_tec(linha[CI["TEC"]]),
             "LAT":        lat,
             "LONG":       lon,
             "CIDADE":     linha[CI["CIDADE"]],
@@ -755,6 +817,28 @@ def _formatar_site_robusto(site_raw):
     return s
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AJUSTE CIRÚRGICO 1 — _buscar_na_base4g
+# Nova função auxiliar centralizada: busca match na Base_4G por lat/lon,
+# com tolerância configurável (padrão 0.002 ≈ ~220m).
+# Usada tanto em processar_arquivo quanto em gerar_relatorio.
+# ─────────────────────────────────────────────────────────────────────────────
+def _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002):
+    """
+    Retorna o subconjunto de df_base cujas coordenadas estão dentro de
+    `tolerancia` graus de (lat, lon).  Tenta primeiro com cidade (se
+    disponível no chamador), mas aqui retorna tudo — o filtro por cidade
+    fica a cargo do chamador quando necessário.
+    """
+    if df_base is None or df_base.empty:
+        return pd.DataFrame()
+    mask = (
+        (abs(df_base["LATITUDE"]  - lat) <= tolerancia) &
+        (abs(df_base["LONGITUDE"] - lon) <= tolerancia)
+    )
+    return df_base[mask]
+
+
 def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
     """
     Converte um DataFrame bruto de qualquer planilha de atividades
@@ -817,7 +901,7 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
 
         # ── TECNOLOGIA — opcional ───────────────────────────────────────
         tec_raw = row[col["TECNOLOGIA"]] if "TECNOLOGIA" in col else ""
-        tec = "" if pd.isna(tec_raw) else str(tec_raw).strip()
+        tec = "" if pd.isna(tec_raw) else normalizar_tec(str(tec_raw).strip())
 
         # ── FREQUÊNCIA ──────────────────────────────────────────────────
         freq_raw = row[col["FREQUENCIA"]] if "FREQUENCIA" in col else ""
@@ -853,28 +937,71 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
 
     df_out = pd.DataFrame(registros)
 
-    # ── Recuperar CIDADE e UF ausentes via Base_4G ───────────────────────
+    # ── Recuperar campos ausentes via Base_4G (por lat/lon) ─────────────
+    # AJUSTE CIRÚRGICO 1b: além de CIDADE e UF, complementa TEC e FREQUÊNCIA
+    # quando ausentes. STATUS, CONCLUIDO e HOTEL nunca são tocados aqui.
     if df_base is not None and not df_out.empty:
         for idx, row in df_out.iterrows():
             precisa_cidade = not row["CIDADE"]
             precisa_uf     = not row["UF"]
-            if (precisa_cidade or precisa_uf) and row["LAT"] != 0.0:
-                try:
-                    mask = (
-                        (abs(df_base["LATITUDE"]  - row["LAT"])  <= 0.002) &
-                        (abs(df_base["LONGITUDE"] - row["LONG"]) <= 0.002)
-                    )
-                    matches = df_base[mask]
-                    if not matches.empty:
-                        m = matches.iloc[0]
-                        if precisa_cidade:
-                            df_out.at[idx, "CIDADE"] = str(m.get("CIDADE", "")).strip().upper()
-                            print(f"{prefixo} ℹ️  {row['SITE']}: CIDADE recuperada da Base_4G: {df_out.at[idx, 'CIDADE']}")
-                        if precisa_uf:
-                            df_out.at[idx, "UF"] = str(m.get("[P]UF", "")).strip().upper()
-                            print(f"{prefixo} ℹ️  {row['SITE']}: UF recuperada da Base_4G: {df_out.at[idx, 'UF']}")
-                except Exception:
-                    pass
+            precisa_tec    = not row["TEC"]
+            precisa_4g     = not row["2G|3G|4G"]
+            precisa_5g     = not row["5G"]
+
+            nada_precisa = not any([precisa_cidade, precisa_uf,
+                                    precisa_tec, precisa_4g, precisa_5g])
+            if nada_precisa or row["LAT"] == 0.0:
+                continue
+
+            try:
+                # Usar função auxiliar centralizada
+                matches = _buscar_na_base4g(df_base, row["LAT"], row["LONG"])
+
+                if matches.empty:
+                    continue
+
+                m = matches.iloc[0]
+
+                if precisa_cidade:
+                    val = str(m.get("CIDADE", "")).strip().upper()
+                    if val and val not in ("", "NAN", "NONE"):
+                        df_out.at[idx, "CIDADE"] = val
+                        print(f"{prefixo} ℹ️  {row['SITE']}: CIDADE recuperada da Base_4G: {val}")
+
+                if precisa_uf:
+                    val = str(m.get("[P]UF", "")).strip().upper()
+                    if val and val not in ("", "NAN", "NONE") and len(val) == 2:
+                        df_out.at[idx, "UF"] = val
+                        print(f"{prefixo} ℹ️  {row['SITE']}: UF recuperada da Base_4G: {val}")
+
+                # ── AJUSTE: complementar TEC quando ausente ──────────────
+                if precisa_tec:
+                    # Tentar coluna TEC ou TECNOLOGIA na Base_4G
+                    for col_tec in ("TEC", "TECNOLOGIA", "TECHNOLOGY"):
+                        if col_tec in matches.columns:
+                            val = str(m.get(col_tec, "")).strip()
+                            if val and val.upper() not in ("", "NAN", "NONE"):
+                                df_out.at[idx, "TEC"] = val
+                                print(f"{prefixo} ℹ️  {row['SITE']}: TEC recuperada da Base_4G: {val}")
+                                break
+
+                # ── AJUSTE: complementar frequências quando ausentes ─────
+                if precisa_4g or precisa_5g:
+                    for col_freq in ("FREQUENCIA", "FREQUÊNCIA", "FREQ", "FREQUENCY"):
+                        if col_freq in matches.columns:
+                            freq_raw_base = str(m.get(col_freq, "")).strip()
+                            if freq_raw_base and freq_raw_base.upper() not in ("", "NAN", "NONE"):
+                                f4g, f5g = normalizar_frequencia(freq_raw_base)
+                                if precisa_4g and f4g:
+                                    df_out.at[idx, "2G|3G|4G"] = f4g
+                                    print(f"{prefixo} ℹ️  {row['SITE']}: 2G|3G|4G recuperada da Base_4G: {f4g}")
+                                if precisa_5g and f5g:
+                                    df_out.at[idx, "5G"] = f5g
+                                    print(f"{prefixo} ℹ️  {row['SITE']}: 5G recuperada da Base_4G: {f5g}")
+                                break
+
+            except Exception as e:
+                print(f"{prefixo} ⚠️  Erro ao buscar Base_4G para {row['SITE']}: {e}")
 
         # Avisar sobre campos ainda ausentes após todas as tentativas
         for _, row in df_out.iterrows():
@@ -944,40 +1071,66 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
             freq_234   = str(row.get("2G|3G|4G",   "")).strip()
             freq_5g    = str(row.get("5G",          "")).strip()
 
-            # Buscar PCI / AZIMUTH na Base 4G
-            mask = df_base.apply(
-                lambda b: (
-                    float_close(lat, b["LATITUDE"])
-                    and float_close(lon, b["LONGITUDE"])
-                    and cidade.lower() == str(b["CIDADE"]).strip().lower()
-                ),
-                axis=1,
-            )
-            matches = df_base[mask]
+            # ─────────────────────────────────────────────────────────────
+            # AJUSTE CIRÚRGICO 2 — busca PCI/AZIMUTH/UF na Base_4G
+            #
+            # Estratégia em dois passos:
+            #   Passo A (restrito): lat + lon + cidade — match exato, mais confiável
+            #   Passo B (relaxado): só lat + lon       — fallback quando cidade diverge
+            #
+            # Isso resolve o caso mais comum de falha: cidade com grafia diferente
+            # (ex: "SAO PAULO" vs "SÃO PAULO", "RIBEIRAO" vs "RIBEIRÃO PRETO").
+            # ─────────────────────────────────────────────────────────────
 
-            pci_list = [str(int(v)) for v in matches["PCI"].dropna().unique()]
-            az_list  = [str(int(v)) for v in matches["AZIMUTH"].dropna().unique()]
+            # Passo A: match com cidade
+            matches = pd.DataFrame()
+            if cidade:
+                mask_a = df_base.apply(
+                    lambda b: (
+                        float_close(lat, b["LATITUDE"])
+                        and float_close(lon, b["LONGITUDE"])
+                        and remove_acentos(cidade).lower() == remove_acentos(str(b["CIDADE"])).strip().lower()
+                    ),
+                    axis=1,
+                )
+                matches = df_base[mask_a]
+
+            # Passo B: fallback só por lat/lon (tolerância 0.002°)
+            if matches.empty:
+                matches = _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002)
+
+            # ── Extrair PCI e AZIMUTH ────────────────────────────────────
+            pci_list = [str(int(v)) for v in matches["PCI"].dropna().unique()]    if "PCI"     in matches.columns else []
+            az_list  = [str(int(v)) for v in matches["AZIMUTH"].dropna().unique()] if "AZIMUTH" in matches.columns else []
             pci_str  = "/".join(unique_preserve_order(pci_list))
             az_str   = "/".join(unique_preserve_order(az_list))
 
-            # ── FIX 1: UF vazia ─────────────────────────────────────────────
-            # 1º: tentar buscar na Base_4G pelo match de lat/lon
+            # ── Aviso quando PCI/AZIMUTH não forem encontrados ───────────
+            # (para o usuário conferir e preencher manualmente se necessário)
+            if not pci_str:
+                print(f"   ⚠️  PCI não encontrado para o site {site} ({cidade}) — confira manualmente.")
+            if not az_str:
+                print(f"   ⚠️  AZIMUTH não encontrado para o site {site} ({cidade}) — confira manualmente.")
+
+            # ── FIX UF vazia — sequência de 3 tentativas ────────────────
             if not uf or uf in ("", "NAN", "NONE"):
                 uf_base = ""
+
+                # Tentativa 1: extrair do match já obtido acima
                 if not matches.empty and "[P]UF" in matches.columns:
                     ufs = matches["[P]UF"].dropna().unique()
                     if len(ufs) > 0:
                         uf_base = str(ufs[0]).strip().upper()
 
-                if uf_base:
+                if uf_base and len(uf_base) == 2 and uf_base.isalpha():
                     uf = uf_base
                     print(f"   ℹ️  UF do site {site} detectada na Base_4G: {uf}")
                 else:
-                    # 2º: verificar cache (já perguntado antes nesta execução)
+                    # Tentativa 2: cache desta execução
                     if site in _uf_cache:
                         uf = _uf_cache[site]
                     else:
-                        # 3º: perguntar ao usuário — não gerar sem UF
+                        # Tentativa 3: perguntar ao usuário
                         print(f"\n⚠️  UF não encontrada para o site {site} ({cidade}).")
                         while True:
                             resp = input(f"   Informe a UF (ex: SP, MG, RJ): ").strip().upper()
@@ -989,7 +1142,7 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
 
             # ── Montar corpo do relatório ────────────────────────────────────
             lines = [
-                f"{uf}-{site}",
+                f"{site}",
                 "",
                 f"{lat} {lon}",
                 "",
@@ -1022,7 +1175,7 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
                 "",
             ]
 
-            # ── FIX 2: Nome do log — menor banda 4G (não só 700) ────────────
+            # ── Nome do log — menor banda 4G ────────────────────────────
             si  = remove_acentos(integracao).replace(" ", "_")
             ss  = remove_acentos(site).replace(" ", "_")
             sc  = remove_acentos(cidade).replace(" ", "_")
@@ -1055,13 +1208,102 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
 
 def carregar_hoteis():
     """
-    Lê HOTEIS.xlsx da pasta DT 3.0 e retorna lista de dicts para o mapa.
-    Colunas esperadas: NOME | CIDADE | LATITUDE | LONGITUDE | TELEFONE | ULTIMO_VALOR
-    Se o arquivo não existir, retorna lista vazia com aviso.
+    Lê a planilha HOTEIS diretamente do Google Sheets via ID fixo.
+
+    Planilha: https://docs.google.com/spreadsheets/d/HOTEIS_SHEET_ID
+    Aba identificada pelo gid HOTEIS_GID (965678690).
+
+    Colunas esperadas (aceita variações de nome, case-insensitive, sem acento):
+      NOME | CIDADE | LATITUDE | LONGITUDE | TELEFONE | ULTIMO_VALOR
+
+    Fallback: se não conseguir acessar o Sheets, tenta HOTEIS.xlsx local.
     """
+
+    def _parse_hoteis(cabecalhos_raw, linhas):
+        """Converte cabeçalhos + linhas brutas em lista de dicts de hotéis."""
+        cabecalhos = [
+            unicodedata.normalize("NFKD", str(c).strip().upper())
+            .encode("ascii", errors="ignore").decode("utf-8")
+            for c in cabecalhos_raw
+        ]
+        col_map = {
+            "nome":   next((i for i, c in enumerate(cabecalhos) if "NOME"   in c), None),
+            "cidade": next((i for i, c in enumerate(cabecalhos) if "CIDADE" in c), None),
+            "lat":    next((i for i, c in enumerate(cabecalhos) if c.startswith("LAT")), None),
+            "lon":    next((i for i, c in enumerate(cabecalhos)
+                            if c.startswith("LON") or c.startswith("LONG")), None),
+            "tel":    next((i for i, c in enumerate(cabecalhos)
+                            if "TEL" in c or "FONE" in c), None),
+            "valor":  next((i for i, c in enumerate(cabecalhos)
+                            if "VALOR" in c or "PRECO" in c), None),
+        }
+
+        def _cel(linha, chave):
+            idx = col_map.get(chave)
+            if idx is None or idx >= len(linha):
+                return ""
+            return str(linha[idx]).strip()
+
+        hoteis = []
+        for linha in linhas:
+            if not any(linha):
+                continue
+            nome = _cel(linha, "nome")
+            if not nome or nome.upper() in ("NAN", "NONE", ""):
+                continue
+            lat = safe_float(_cel(linha, "lat"))
+            lon = safe_float(_cel(linha, "lon"))
+            if lat == 0.0 and lon == 0.0:
+                continue
+            cidade = _cel(linha, "cidade")
+            tel    = _cel(linha, "tel")
+            valor  = _cel(linha, "valor")
+            cidade = "" if cidade.upper() in ("NAN", "NONE") else cidade
+            tel    = "" if tel.upper()    in ("NAN", "NONE") else tel
+            valor  = "" if valor.upper()  in ("NAN", "NONE") else valor
+            hoteis.append({
+                "nome": nome, "cidade": cidade,
+                "lat": lat,   "lon": lon,
+                "tel": tel,   "valor": valor,
+            })
+        return hoteis
+
+    # ── Tentativa principal: Google Sheets pelo ID fixo ───────────────────────
+    try:
+        client  = conectar_sheets()
+        sh      = client.open_by_key(HOTEIS_SHEET_ID)
+
+        # Localizar a aba pelo gid — mais confiável que buscar pelo nome
+        ws_h = None
+        for aba in sh.worksheets():
+            if aba.id == HOTEIS_GID:
+                ws_h = aba
+                break
+
+        # Fallback: primeira aba caso o gid não bata (planilha reformatada)
+        if ws_h is None:
+            ws_h = sh.get_worksheet(0)
+            print(f"   ℹ️  Aba com gid {HOTEIS_GID} não encontrada — usando primeira aba.")
+
+        dados = ws_h.get_all_values()
+        if not dados or len(dados) < 2:
+            print("   ⚠️  Planilha HOTEIS vazia no Google Sheets.")
+            return []
+
+        hoteis = _parse_hoteis(dados[0], dados[1:])
+        print(f"   {len(hoteis)} hoteis carregados do Google Sheets (aba: {ws_h.title}).")
+        return hoteis
+
+    except gspread.exceptions.SpreadsheetNotFound:
+        print(f"   ⚠️  Planilha HOTEIS (ID: {HOTEIS_SHEET_ID}) não encontrada.")
+        print("      Verifique se a service account tem acesso à planilha.")
+    except Exception as e:
+        print(f"   ⚠️  Erro ao acessar HOTEIS no Google Sheets: {e}")
+
+    # ── Fallback: HOTEIS.xlsx local ───────────────────────────────────────────
+    print("   → Tentando fallback: HOTEIS.xlsx local...")
     if not HOTEIS_PATH.exists():
-        print("   ⚠️  HOTEIS.xlsx não encontrado — hoteis nao serao exibidos no mapa.")
-        print(f"      Crie o arquivo em: {HOTEIS_PATH}")
+        print("   ⚠️  HOTEIS.xlsx também não encontrado — hoteis não serão exibidos.")
         return []
 
     try:
@@ -1072,49 +1314,12 @@ def carregar_hoteis():
             .str.encode("ascii", errors="ignore")
             .str.decode("utf-8")
         )
-
-        # Aceitar variações de nome de coluna
-        col_map = {
-            "nome":     next((c for c in df.columns if "NOME" in c), None),
-            "cidade":   next((c for c in df.columns if "CIDADE" in c), None),
-            "lat":      next((c for c in df.columns if "LAT" in c), None),
-            "lon":      next((c for c in df.columns if "LON" in c or "LONG" in c), None),
-            "tel":      next((c for c in df.columns if "TEL" in c or "FONE" in c), None),
-            "valor":    next((c for c in df.columns if "VALOR" in c or "PRECO" in c or "PRECO" in c), None),
-        }
-
-        hoteis = []
-        for _, row in df.iterrows():
-            nome = str(row[col_map["nome"]]).strip() if col_map["nome"] else ""
-            if not nome or nome.upper() in ("NAN", "NONE", ""):
-                continue
-
-            lat = safe_float(row[col_map["lat"]]) if col_map["lat"] else 0.0
-            lon = safe_float(row[col_map["lon"]]) if col_map["lon"] else 0.0
-            if lat == 0.0 and lon == 0.0:
-                continue
-
-            cidade = str(row[col_map["cidade"]]).strip() if col_map["cidade"] else ""
-            tel    = str(row[col_map["tel"]]).strip()   if col_map["tel"]    else ""
-            valor  = str(row[col_map["valor"]]).strip() if col_map["valor"]  else ""
-
-            # Limpar "nan" de campos opcionais
-            cidade = "" if cidade.upper() in ("NAN", "NONE") else cidade
-            tel    = "" if tel.upper()    in ("NAN", "NONE") else tel
-            valor  = "" if valor.upper()  in ("NAN", "NONE") else valor
-
-            hoteis.append({
-                "nome":   nome,
-                "cidade": cidade,
-                "lat":    lat,
-                "lon":    lon,
-                "tel":    tel,
-                "valor":  valor,
-            })
-
-        print(f"   {len(hoteis)} hoteis carregados de HOTEIS.xlsx")
+        # Reutiliza _parse_hoteis convertendo o DataFrame em listas
+        cabecalhos = list(df.columns)
+        linhas = df.astype(str).values.tolist()
+        hoteis = _parse_hoteis(cabecalhos, linhas)
+        print(f"   {len(hoteis)} hoteis carregados de HOTEIS.xlsx (fallback local).")
         return hoteis
-
     except Exception as e:
         print(f"   ❌ Erro ao ler HOTEIS.xlsx: {e}")
         return []
@@ -1740,6 +1945,34 @@ def main():
     df_pool_sheets = df_pool_sheets[
         (df_pool_sheets["LAT"] != 0) & (df_pool_sheets["LONG"] != 0)
     ]
+
+    # ── AJUSTE: complementar UF e TEC ausentes no pool do Sheets via Base_4G ──
+    # Nunca toca em STATUS, CONCLUIDO, HOTEL.
+    for idx, row in df_pool_sheets.iterrows():
+        precisa_uf  = not str(row.get("UF",  "")).strip()
+        precisa_tec = not str(row.get("TEC", "")).strip()
+        if not (precisa_uf or precisa_tec):
+            continue
+        try:
+            matches = _buscar_na_base4g(df_base, row["LAT"], row["LONG"])
+            if matches.empty:
+                continue
+            m = matches.iloc[0]
+            if precisa_uf and "[P]UF" in matches.columns:
+                val = str(m.get("[P]UF", "")).strip().upper()
+                if val and val not in ("", "NAN", "NONE") and len(val) == 2 and val.isalpha():
+                    df_pool_sheets.at[idx, "UF"] = val
+                    print(f"   ℹ️  {row['SITE']}: UF complementada do Sheets via Base_4G: {val}")
+            if precisa_tec:
+                for col_tec in ("TEC", "TECNOLOGIA", "TECHNOLOGY"):
+                    if col_tec in matches.columns:
+                        val = normalizar_tec(str(m.get(col_tec, "")).strip())
+                        if val and val.upper() not in ("", "NAN", "NONE"):
+                            df_pool_sheets.at[idx, "TEC"] = val
+                            print(f"   ℹ️  {row['SITE']}: TEC complementada do Sheets via Base_4G: {val}")
+                            break
+        except Exception:
+            pass
 
     # Sites já no pool para evitar duplicatas
     sites_originais  = set(df_sheets["SITE"].str.upper())
