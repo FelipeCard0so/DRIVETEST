@@ -124,26 +124,19 @@ def formatar_site(site):
 # NORMALIZAÇÃO DE TECNOLOGIA (TEC)
 # ============================================================
 
-# Tabela de substituição: chave = valor bruto normalizado → valor padronizado
-# Ordem importa: mais específico primeiro (ex: LTE|NR antes de LTE)
 _MAPA_TEC = [
-    # 4 tecnologias
     (r"^2G[|/]3G[|/]LTE[|/]NR$",  "2G|3G|4G|5G"),
-    # 3 tecnologias
     (r"^3G[|/]LTE[|/]NR$",         "3G|4G|5G"),
     (r"^2G[|/]3G[|/]LTE$",         "2G|3G|4G"),
     (r"^2G[|/]3G[|/]NR$",          "2G|3G|5G"),
-    # 2 tecnologias
     (r"^LTE[|/]NR$",               "4G|5G"),
     (r"^3G[|/]LTE$",               "3G|4G"),
     (r"^3G[|/]NR$",                "3G|5G"),
     (r"^2G[|/]LTE$",               "2G|4G"),
-    # 1 tecnologia
     (r"^LTE$",                     "4G"),
     (r"^NR$",                      "5G"),
 ]
 
-# Valores já no padrão correto — não tocar
 _TEC_PADRAO = {"2G", "3G", "4G", "5G",
                "2G|3G", "2G|4G", "2G|5G",
                "3G|4G", "3G|5G", "4G|5G",
@@ -152,31 +145,17 @@ _TEC_PADRAO = {"2G", "3G", "4G", "5G",
 
 
 def normalizar_tec(valor):
-    """
-    Converte valores de TEC fora do padrão para o padrão DT 3.0.
-
-    Exemplos:
-      'LTE'          → '4G'
-      'LTE|NR'       → '4G|5G'
-      '3G|LTE|NR'   → '3G|4G|5G'
-      '2G|3G|LTE|NR' → '2G|3G|4G|5G'
-      '4G'           → '4G'   (já correto, sem alteração)
-      ''             → ''     (vazio, sem alteração)
-    """
     if not valor:
         return valor
     s = str(valor).strip().upper()
     if not s or s in ("NAN", "NONE"):
         return ""
-    # Já está no padrão — retorna sem tocar
     if s in _TEC_PADRAO:
         return s
-    # Normalizar separadores: / → |  e remover espaços
     s_norm = re.sub(r"\s*[/]\s*", "|", s)
     for padrao, substituto in _MAPA_TEC:
         if re.match(padrao, s_norm, re.IGNORECASE):
             return substituto
-    # Não reconhecido — retorna o original sem alterar (nunca inventa)
     return valor.strip()
 
 
@@ -185,11 +164,6 @@ def normalizar_tec(valor):
 # ============================================================
 
 def _ordenar_nums_4g(nums_str):
-    """
-    Recebe lista de strings tipo ['2600', '700', '1800RS']
-    Retorna reordenada por ORDEM_BANDA_4G (700, 850, 900, 1800, 2100, 2300, 2600).
-    Sufixos como RS são preservados.
-    """
     def chave(x):
         num = int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 9999
         return ORDEM_BANDA_4G.index(num) if num in ORDEM_BANDA_4G else 99
@@ -197,10 +171,6 @@ def _ordenar_nums_4g(nums_str):
 
 
 def _reordenar_bloco_4g(bloco):
-    """
-    Recebe '4G:2600/1800/700' ou '4G:700/1800/2100/2300/2600'
-    Retorna '4G:700/1800/2600' (ordenado).
-    """
     if ':' not in bloco:
         return bloco
     tec, nums_raw = bloco.split(':', 1)
@@ -210,21 +180,11 @@ def _reordenar_bloco_4g(bloco):
 
 
 def normalizar_frequencia(freq_raw):
-    """
-    Normaliza qualquer formato de frequência para (freq_234g, freq_5g).
-
-    Exemplos:
-      'N3500|L2600/L2100/L1800/L700'          → ('4G: 700/1800/2100/2600', '5G: 3500')
-      '3G:850|4G:700/1800/2100/2600|5G:3500'  → ('3G:850|4G:700/1800/2100/2600', '5G:3500')
-      '4G:2600/1800/700|5G:3500'               → ('4G:700/1800/2600', '5G:3500')
-      '4G:700/2600RS'                          → ('4G:700/2600RS', '')
-    """
     if not isinstance(freq_raw, str) or not freq_raw.strip():
         return "", ""
 
     freq = freq_raw.strip()
 
-    # ---- Formato antigo: NR?NNNN e LNNNN sem 'G:' ----
     if re.search(r'\b(?:NR?|L)\d{3,4}', freq, re.IGNORECASE) and 'G:' not in freq:
         freq_5g = ""
         nums_4g = []
@@ -242,7 +202,6 @@ def normalizar_frequencia(freq_raw):
 
         return freq_4g, freq_5g
 
-    # ---- Formato já limpo: separar 5G e reordenar 4G ----
     partes = freq.split("|")
     ate_4g, freq_5g = [], ""
 
@@ -299,12 +258,10 @@ def vizinho_mais_proximo(df, lat0, lon0):
 
 
 def _rota_para_coords(df):
-    """Converte DataFrame de rota em lista de (lat, lon) para cálculos rápidos."""
     return [(r["LAT"], r["LONG"]) for _, r in df.iterrows()]
 
 
 def _dist_coords(coords, lat0, lon0):
-    """Calcula distância total de uma lista de coords."""
     total, la, lo = 0, lat0, lon0
     for lat, lon in coords:
         total += haversine(la, lo, lat, lon)
@@ -313,7 +270,6 @@ def _dist_coords(coords, lat0, lon0):
 
 
 def two_opt(df, lat0, lon0):
-    """2-OPT clássico — inverte segmentos."""
     rota = df.reset_index(drop=True)
     coords = _rota_para_coords(rota)
     melhor_d = _dist_coords(coords, lat0, lon0)
@@ -328,7 +284,6 @@ def two_opt(df, lat0, lon0):
                     coords = nova
                     melhor_d = d
                     melhorou = True
-    # Reconstruir DataFrame na nova ordem
     idx_map = {(r["LAT"], r["LONG"]): i for i, (_, r) in enumerate(rota.iterrows())}
     nova_ordem = []
     for lat, lon in coords:
@@ -337,22 +292,15 @@ def two_opt(df, lat0, lon0):
 
 
 def three_opt(df, lat0, lon0):
-    """
-    3-OPT: testa todas as combinações de 3 arestas e aplica a melhor
-    reconexão possível (8 variantes por tripla de segmentos).
-    Resolve cruzamentos que o 2-OPT não consegue desfazer.
-    """
     rota = df.reset_index(drop=True)
     coords = _rota_para_coords(rota)
     n = len(coords)
     melhor_d = _dist_coords(coords, lat0, lon0)
     melhorou = True
 
-    # Pré-calcular todas as distâncias entre pares (cache)
     def d(a, b):
         return haversine(a[0], a[1], b[0], b[1])
 
-    # Ponto de origem como coordenada
     origem = (lat0, lon0)
 
     def dist_total(seq):
@@ -363,21 +311,19 @@ def three_opt(df, lat0, lon0):
         for i in range(n - 2):
             for j in range(i + 1, n - 1):
                 for k in range(j + 1, n):
-                    # Segmentos: [0..i] [i+1..j] [j+1..k] [k+1..n-1]
                     A = coords[:i+1]
                     B = coords[i+1:j+1]
                     C = coords[j+1:k+1]
                     D = coords[k+1:]
 
-                    # 7 reconexões possíveis além da original
                     candidatos = [
-                        A + B[::-1] + C       + D,   # 2-opt AB
-                        A + B       + C[::-1] + D,   # 2-opt BC
-                        A + B[::-1] + C[::-1] + D,   # 2-opt AB+BC
-                        A + C       + B       + D,   # 3-opt move B após C
-                        A + C       + B[::-1] + D,   # 3-opt + inv B
-                        A + C[::-1] + B       + D,   # 3-opt + inv C
-                        A + C[::-1] + B[::-1] + D,   # 3-opt + inv ambos
+                        A + B[::-1] + C       + D,
+                        A + B       + C[::-1] + D,
+                        A + B[::-1] + C[::-1] + D,
+                        A + C       + B       + D,
+                        A + C       + B[::-1] + D,
+                        A + C[::-1] + B       + D,
+                        A + C[::-1] + B[::-1] + D,
                     ]
 
                     for cand in candidatos:
@@ -387,7 +333,6 @@ def three_opt(df, lat0, lon0):
                             melhor_d = d_cand
                             melhorou = True
 
-    # Reconstruir DataFrame
     idx_map = {}
     for i, (_, r) in enumerate(rota.iterrows()):
         idx_map[(r["LAT"], r["LONG"])] = i
@@ -396,10 +341,6 @@ def three_opt(df, lat0, lon0):
 
 
 def or_opt(df, lat0, lon0, tamanho_seg=None):
-    """
-    Or-Opt: move segmentos de 1, 2 ou 3 cidades para outra posição da rota.
-    Resolve o caso clássico de cidades 'puladas' que ficam no caminho.
-    """
     rota = df.reset_index(drop=True)
     coords = _rota_para_coords(rota)
     n = len(coords)
@@ -425,7 +366,6 @@ def or_opt(df, lat0, lon0, tamanho_seg=None):
                         melhor_d = d_nova
                         melhorou = True
 
-    # Reconstruir DataFrame
     idx_map = {}
     for i, (_, r) in enumerate(rota.iterrows()):
         idx_map[(r["LAT"], r["LONG"])] = i
@@ -434,30 +374,20 @@ def or_opt(df, lat0, lon0, tamanho_seg=None):
 
 
 def otimizar_rota(df_pool, lat0, lon0):
-    """
-    Pipeline completo de otimização:
-    1. Múltiplos pontos de partida (vizinho mais próximo a partir de cada cidade)
-    2. 2-OPT em cada candidato
-    3. Or-Opt (move segmentos de 1-3 cidades)
-    4. 3-OPT (resolve cruzamentos complexos)
-    5. Or-Opt final para polish
-    """
     n = len(df_pool)
     print(f"   → Gerando candidatos ({n} pontos de partida alternativos)...")
 
     melhor_rota = None
     melhor_d = float("inf")
 
-    # Candidato 1: ponto de partida real
     pontos_inicio = [(lat0, lon0)]
 
-    # Candidatos adicionais: cada cidade como ponto de partida fictício
     for _, r in df_pool.iterrows():
         pontos_inicio.append((r["LAT"], r["LONG"]))
 
     for i, (la, lo) in enumerate(pontos_inicio):
         rota_c = vizinho_mais_proximo(df_pool, la, lo)
-        d_c = distancia_total(rota_c, lat0, lon0)  # distância sempre medida da origem real
+        d_c = distancia_total(rota_c, lat0, lon0)
         if d_c < melhor_d:
             melhor_d = d_c
             melhor_rota = rota_c
@@ -518,7 +448,6 @@ def obter_aba_vigente(sheet):
         if abas:
             sheet.duplicate_sheet(abas[-1].id, new_sheet_name=nome)
             ws = sheet.worksheet(nome)
-            # Limpar dados mantendo cabeçalhos (linhas 1 e 2)
             all_vals = ws.get_all_values()
             if len(all_vals) >= DATA_START_ROW:
                 last = len(all_vals)
@@ -528,6 +457,115 @@ def obter_aba_vigente(sheet):
         return ws
 
 
+MESES_MAPA = [
+    "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
+    "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+]
+
+
+def _normalizar_status_mapa(status):
+    s = remove_acentos(str(status or "")).upper()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def status_fixo_mapa(status):
+    s_norm = _normalizar_status_mapa(status)
+    return (
+        "CONCLUID" in s_norm
+        or "IMPRODUT" in s_norm
+        or "CANCEL" in s_norm
+    )
+
+
+def mask_status_fixos_mapa(df):
+    if df is None or df.empty or "STATUS" not in df.columns:
+        return pd.Series([], dtype=bool, index=df.index if df is not None else None)
+    return df["STATUS"].apply(status_fixo_mapa)
+
+
+def tipo_status_mapa(status):
+    s_norm = _normalizar_status_mapa(status)
+    if "CANCEL" in s_norm:
+        return "cancelada"
+    if "CONCLUID" in s_norm:
+        return "concluida"
+    return "improdutiva"
+
+
+def normalizar_coord_mapa(valor, limite):
+    coord = safe_float(valor)
+    if coord == 0:
+        return coord
+    while abs(coord) > limite:
+        coord = coord / 10.0
+    return coord
+
+
+def carregar_meses_anteriores(sheet, aba_atual_nome):
+    import re as _re
+
+    mes_idx = {remove_acentos(m).upper(): i + 1 for i, m in enumerate(MESES_MAPA)}
+    historico = {}
+    total = 0
+
+    for ws_mes in sheet.worksheets():
+        titulo = str(ws_mes.title).strip()
+        if titulo == aba_atual_nome:
+            continue
+
+        titulo_norm = remove_acentos(titulo).upper()
+        m = _re.match(r"^([A-Z]+)\s*/\s*(20\d{2})$", titulo_norm)
+        if not m:
+            continue
+
+        mes_nome, ano = m.group(1), int(m.group(2))
+        if ano < 2025 or mes_nome not in mes_idx:
+            continue
+
+        try:
+            df_mes = ler_atividades_sheets(ws_mes)
+        except Exception as e:
+            print(f"   ⚠️  Nao foi possivel ler a aba {titulo}: {e}")
+            continue
+
+        if df_mes.empty:
+            continue
+
+        df_mes = df_mes[mask_status_fixos_mapa(df_mes)].copy()
+        df_mes = df_mes.dropna(subset=["LAT", "LONG"])
+        df_mes = df_mes[(df_mes["LAT"] != 0) & (df_mes["LONG"] != 0)]
+        if df_mes.empty:
+            continue
+
+        ano_s = str(ano)
+        mes_s = str(mes_idx[mes_nome])
+        historico.setdefault(ano_s, {})[mes_s] = {
+            "label": f"{MESES_MAPA[mes_idx[mes_nome] - 1].title()}/{ano}",
+            "pontos": [],
+        }
+
+        for _, row in df_mes.iterrows():
+            historico[ano_s][mes_s]["pontos"].append({
+                "id":        str(row.get("SITE", "")),
+                "cidade":    str(row.get("CIDADE", "")),
+                "tec4g":     str(row.get("2G|3G|4G", "")),
+                "tec5g":     str(row.get("5G", "")),
+                "concluido": str(row.get("CONCLUIDO", "") or ""),
+                "hotel":     str(row.get("HOTEL", "") or ""),
+                "status":    str(row.get("STATUS", "") or ""),
+                "tipo":      tipo_status_mapa(row.get("STATUS", "")),
+                "lat":       normalizar_coord_mapa(row.get("LAT", 0), 90),
+                "lon":       normalizar_coord_mapa(row.get("LONG", 0), 180),
+            })
+            total += 1
+
+    if total:
+        print(f"   {total} atividades anteriores carregadas para consulta no mapa.")
+    else:
+        print("   Nenhuma atividade anterior encontrada para consulta no mapa.")
+    return historico
+
 COLUNAS_SHEETS = [
     "ROW_SHEET", "DEMANDA", "INTEGRAÇÃO", "SITE", "UF", "TEC",
     "LAT", "LONG", "CIDADE", "2G|3G|4G", "5G", "STATUS", "CONCLUIDO", "HOTEL",
@@ -535,16 +573,14 @@ COLUNAS_SHEETS = [
 
 
 def ler_atividades_sheets(ws):
-    """Lê todas as linhas de dados e retorna DataFrame com colunas sempre definidas."""
     dados = ws.get_all_values()
-    linhas = dados[DATA_START_ROW - 1:]   # 0-indexed
+    linhas = dados[DATA_START_ROW - 1:]
     registros = []
 
     for i, linha in enumerate(linhas):
         while len(linha) <= max(CI.values()):
             linha.append("")
 
-        # Ignorar linhas completamente vazias
         if not any(linha[:8]):
             continue
 
@@ -572,24 +608,15 @@ def ler_atividades_sheets(ws):
         })
 
     if not registros:
-        # Retorna DataFrame vazio mas com todas as colunas definidas
         return pd.DataFrame(columns=COLUNAS_SHEETS)
 
     return pd.DataFrame(registros)
 
 
 def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None):
-    """
-    Grava a planilha atualizada:
-    - Linhas fixas (concluídas/improdutivas) permanecem na ordem original
-    - Demais linhas vêm em seguida na ordem otimizada
-    - "Aguardando para deslocar" vai ao final, separado por linha em branco
-    - "Nova Atividade" é limpo de atividades antigas; adicionado às novas
-    """
     print("   Montando linhas...")
 
     def _coord(v):
-        """Converte coordenada para string com vírgula (padrão BR do Sheets)."""
         try:
             return str(float(v)).replace(".", ",")
         except Exception:
@@ -615,43 +642,34 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
 
     todas_linhas = []
 
-    # 1. Atividades fixas (ordem original)
     for _, row in df_fixas.iterrows():
         todas_linhas.append(formatar_linha(row.to_dict()))
 
-    # 2. Atividades otimizadas
     for _, row in df_rota.iterrows():
         row_d = row.to_dict()
         site = str(row_d.get("SITE", "")).upper()
 
         if site in sites_originais:
-            # Já existia: limpa "Nova Atividade", mantém status atual
             status = row_d.get("STATUS", "")
             if status == ST_NOVA:
                 status = ""
         else:
-            # Nova: marca com "Nova Atividade"
             status = ST_NOVA
 
         todas_linhas.append(formatar_linha(row_d, status_override=status))
 
-    # 3. Adicionar "Aguardando para deslocar" no final (separado por linha em branco)
     if df_aguardando is not None and not df_aguardando.empty:
-        todas_linhas.append([""] * 13)   # linha em branco separadora
+        todas_linhas.append([""] * 13)
         for _, row in df_aguardando.iterrows():
             todas_linhas.append(formatar_linha(row.to_dict()))
 
-    # 4. Gravar
     end_row = DATA_START_ROW + len(todas_linhas) - 1
     range_ref = f"A{DATA_START_ROW}:M{end_row}"
     ws.update(values=todas_linhas, range_name=range_ref, value_input_option="USER_ENTERED")
 
-    # 5. Limpar apenas linhas excedentes vazias (nunca apaga atividades reais)
-    # Lê de volta para saber quantas linhas realmente têm conteúdo após o que gravamos
     dados_atuais = ws.get_all_values()
     ultima_linha_com_dados = len(dados_atuais)
     if ultima_linha_com_dados > end_row:
-        # Só limpa se as linhas de fato existem e estão além do nosso bloco
         ws.batch_clear([f"A{end_row + 1}:M{ultima_linha_com_dados}"])
 
     print(f"   ✅ {len(todas_linhas)} linhas gravadas no Google Sheets.")
@@ -678,11 +696,6 @@ def _reverse_geocode(lat, lon):
 
 
 def determinar_ponto_inicio(df_sheets):
-    """
-    Determina ponto de partida baseado na última atividade concluída
-    ou deslocamento ativo, com opção de entrada manual.
-    """
-    # Planilha pode estar vazia (aba nova) — protege o acesso à coluna STATUS
     if not df_sheets.empty and "STATUS" in df_sheets.columns:
         concluidas = df_sheets[df_sheets["STATUS"] == ST_CONCLUIDO]
 
@@ -698,7 +711,6 @@ def determinar_ponto_inicio(df_sheets):
                 if resp == "S":
                     return float(lat_u), float(lon_u), str(cidade)
 
-        # Verificar deslocamento ativo
         desloc = df_sheets[
             df_sheets["STATUS"].str.contains(
                 "EM DESLOCAMENTO|Aguardando", na=False, case=False
@@ -726,7 +738,6 @@ def determinar_ponto_inicio(df_sheets):
             except Exception:
                 print("   ⚠️  Entrada inválida. Tentando detecção por IP...")
 
-    # Detecção por IP
     try:
         r = requests.get("http://ip-api.com/json/", timeout=5)
         d = r.json()
@@ -747,13 +758,11 @@ def determinar_ponto_inicio(df_sheets):
 # LEITURA DAS NOVAS ATIVIDADES
 # ============================================================
 
-# Mapeamento de campos internos para variações de nome de coluna
-# Adicione aqui novos sinônimos se seu chefe mudar algum nome
 _MAPA_COLUNAS = {
     "SITE":        ["SITE", "SITES", "SITE_ID", "COD_SITE", "NOME_SITE", "CODIGO"],
     "CIDADE":      ["CIDADE", "MUNICIPIO", "CITY", "LOCALIDADE"],
     "UF":          ["UF", "ESTADO", "STATE", "REGIONAL", "UF_SITE"],
-    "LATITUDE":    ["LATITUDE", "LAT", "LATIT"],       # espaços removidos na normalização
+    "LATITUDE":    ["LATITUDE", "LAT", "LATIT"],
     "LONGITUDE":   ["LONGITUDE", "LON", "LONG", "LONGIT"],
     "FREQUENCIA":  ["FREQUENCIA", "FREQUÊNCIA", "FREQ", "FREQUENCIAS", "FREQUENCY"],
     "VENDOR":      ["VENDOR", "EQUIPE_RF", "EMPRESA_RF", "FORNECEDOR", "INTEGRADOR_RF"],
@@ -763,11 +772,6 @@ _MAPA_COLUNAS = {
 
 
 def _resolver_colunas(df_raw):
-    """
-    Normaliza os nomes de colunas do DataFrame recebido e
-    retorna um dict {campo_interno: nome_original_no_arquivo}.
-    """
-    # Normalizar: strip + upper + sem acento
     cols_norm = {}
     for col_orig in df_raw.columns:
         col_n = (unicodedata.normalize("NFKD", str(col_orig).strip().upper())
@@ -791,7 +795,6 @@ def _resolver_colunas(df_raw):
 
 
 def _limpar_uf(val):
-    """Retorna UF válida (2 letras) ou string vazia."""
     s = str(val).strip().upper()
     if s in ("", "NAN", "NONE", "0") or not s.isalpha():
         return ""
@@ -799,37 +802,19 @@ def _limpar_uf(val):
 
 
 def _limpar_cidade(val):
-    """Retorna cidade em maiúsculas ou string vazia."""
     s = str(val).strip().upper()
     return "" if s in ("", "NAN", "NONE") else s
 
 
 def _formatar_site_robusto(site_raw):
-    """
-    Formata código de site para padrão UF-XXX.
-    Trata sufixos como _B, _A, _C (ex: MGGCR_B → MG-GCR).
-    """
     s = str(site_raw).strip().upper()
-    # Remover sufixo _X (letra única no final)
     s = re.sub(r"_[A-Z]$", "", s)
     if len(s) >= 5:
         return f"{s[:2]}-{s[-3:]}"
     return s
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AJUSTE CIRÚRGICO 1 — _buscar_na_base4g
-# Nova função auxiliar centralizada: busca match na Base_4G por lat/lon,
-# com tolerância configurável (padrão 0.002 ≈ ~220m).
-# Usada tanto em processar_arquivo quanto em gerar_relatorio.
-# ─────────────────────────────────────────────────────────────────────────────
 def _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002):
-    """
-    Retorna o subconjunto de df_base cujas coordenadas estão dentro de
-    `tolerancia` graus de (lat, lon).  Tenta primeiro com cidade (se
-    disponível no chamador), mas aqui retorna tudo — o filtro por cidade
-    fica a cargo do chamador quando necessário.
-    """
     if df_base is None or df_base.empty:
         return pd.DataFrame()
     mask = (
@@ -840,26 +825,11 @@ def _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002):
 
 
 def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
-    """
-    Converte um DataFrame bruto de qualquer planilha de atividades
-    para o formato interno do DT 3.0.
-
-    Proteções implementadas:
-    - Nomes de colunas com espaço, case, acentos, sinônimos
-    - UF = 0 ou inválida (marcada vazia para busca na Base_4G)
-    - Cidade vazia/NaN (marcada vazia para busca por coordenadas)
-    - Sufixos no código do site (_B, _A, etc.)
-    - Tecnologia ausente (NaN → string vazia, não bloqueia)
-    - Linhas sem coordenadas são descartadas com aviso
-    - Linhas sem SITE são descartadas com aviso
-    """
     prefixo = f"   [{nome_arquivo}]" if nome_arquivo else "  "
 
-    # ── 1. Resolver colunas ─────────────────────────────────────────────
     col = _resolver_colunas(df_raw)
 
     def _get(campo, default=""):
-        """Retorna valor da coluna ou default se coluna não existir."""
         if campo not in col:
             return default
         v = df_raw[col[campo]]
@@ -869,9 +839,8 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
     descartados = 0
 
     for idx, row in df_raw.iterrows():
-        linha_num = idx + 2   # +2 porque idx começa em 0 e linha 1 é cabeçalho
+        linha_num = idx + 2
 
-        # ── SITE — obrigatório ──────────────────────────────────────────
         site_raw = str(row[col["SITE"]]).strip() if "SITE" in col else ""
         if not site_raw or site_raw.upper() in ("NAN", "NONE", ""):
             print(f"{prefixo} ⚠️  Linha {linha_num}: SITE vazio — ignorada")
@@ -879,7 +848,6 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
             continue
         site = _formatar_site_robusto(site_raw)
 
-        # ── COORDENADAS — obrigatórias ──────────────────────────────────
         lat  = safe_float(row[col["LATITUDE"]])  if "LATITUDE"  in col else 0.0
         lon  = safe_float(row[col["LONGITUDE"]]) if "LONGITUDE" in col else 0.0
         if lat == 0.0 and lon == 0.0:
@@ -887,30 +855,25 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
             descartados += 1
             continue
 
-        # ── UF ──────────────────────────────────────────────────────────
         uf_raw = row[col["UF"]] if "UF" in col else ""
         uf = _limpar_uf(uf_raw)
         if not uf:
             print(f"{prefixo} ℹ️  {site}: UF ausente/invalida ({repr(uf_raw)}) — sera buscada na Base_4G")
 
-        # ── CIDADE ──────────────────────────────────────────────────────
         cidade_raw = row[col["CIDADE"]] if "CIDADE" in col else ""
         cidade = _limpar_cidade(cidade_raw)
         if not cidade:
             print(f"{prefixo} ℹ️  {site}: CIDADE vazia — sera buscada por coordenadas")
 
-        # ── TECNOLOGIA — opcional ───────────────────────────────────────
         tec_raw = row[col["TECNOLOGIA"]] if "TECNOLOGIA" in col else ""
         tec = "" if pd.isna(tec_raw) else normalizar_tec(str(tec_raw).strip())
 
-        # ── FREQUÊNCIA ──────────────────────────────────────────────────
         freq_raw = row[col["FREQUENCIA"]] if "FREQUENCIA" in col else ""
         if pd.isna(freq_raw) or str(freq_raw).strip().upper() in ("NAN", "NONE", ""):
             freq_234, freq_5g = "", ""
         else:
             freq_234, freq_5g = normalizar_frequencia(str(freq_raw).strip())
 
-        # ── DEMANDA / VENDOR ────────────────────────────────────────────
         def _s(campo):
             if campo not in col: return ""
             v = row[col[campo]]
@@ -937,9 +900,6 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
 
     df_out = pd.DataFrame(registros)
 
-    # ── Recuperar campos ausentes via Base_4G (por lat/lon) ─────────────
-    # AJUSTE CIRÚRGICO 1b: além de CIDADE e UF, complementa TEC e FREQUÊNCIA
-    # quando ausentes. STATUS, CONCLUIDO e HOTEL nunca são tocados aqui.
     if df_base is not None and not df_out.empty:
         for idx, row in df_out.iterrows():
             precisa_cidade = not row["CIDADE"]
@@ -954,7 +914,6 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
                 continue
 
             try:
-                # Usar função auxiliar centralizada
                 matches = _buscar_na_base4g(df_base, row["LAT"], row["LONG"])
 
                 if matches.empty:
@@ -974,9 +933,7 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
                         df_out.at[idx, "UF"] = val
                         print(f"{prefixo} ℹ️  {row['SITE']}: UF recuperada da Base_4G: {val}")
 
-                # ── AJUSTE: complementar TEC quando ausente ──────────────
                 if precisa_tec:
-                    # Tentar coluna TEC ou TECNOLOGIA na Base_4G
                     for col_tec in ("TEC", "TECNOLOGIA", "TECHNOLOGY"):
                         if col_tec in matches.columns:
                             val = str(m.get(col_tec, "")).strip()
@@ -985,7 +942,6 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
                                 print(f"{prefixo} ℹ️  {row['SITE']}: TEC recuperada da Base_4G: {val}")
                                 break
 
-                # ── AJUSTE: complementar frequências quando ausentes ─────
                 if precisa_4g or precisa_5g:
                     for col_freq in ("FREQUENCIA", "FREQUÊNCIA", "FREQ", "FREQUENCY"):
                         if col_freq in matches.columns:
@@ -1003,7 +959,6 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
             except Exception as e:
                 print(f"{prefixo} ⚠️  Erro ao buscar Base_4G para {row['SITE']}: {e}")
 
-        # Avisar sobre campos ainda ausentes após todas as tentativas
         for _, row in df_out.iterrows():
             if not row["CIDADE"]:
                 print(f"{prefixo} ⚠️  {row['SITE']}: CIDADE nao encontrada em nenhuma fonte.")
@@ -1013,16 +968,11 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
     return df_out
 
 
-# Manter alias para compatibilidade com chamadas existentes
 def processar_felipe(df_raw, df_base=None):
     return processar_arquivo(df_raw, df_base=df_base)
 
 
 def encontrar_arquivos_novas():
-    """
-    Retorna lista com todos os .xlsx/.xls encontrados na pasta 'novas atividades'.
-    Independente do nome do arquivo — qualquer planilha na pasta sera processada.
-    """
     PASTA_NOVAS.mkdir(parents=True, exist_ok=True)
     arquivos = [
         arq for arq in PASTA_NOVAS.iterdir()
@@ -1041,7 +991,6 @@ def encontrar_arquivos_novas():
 # ============================================================
 
 def _menor_banda_4g(freq_234):
-    """Retorna a menor banda 4G presente na string de frequências."""
     import re as _re
     ORDEM = [700, 850, 900, 1800, 2100, 2300, 2600]
     nums = [int(n) for n in _re.findall(r"\b(\d{3,4})(?:RS)?\b", freq_234)]
@@ -1056,7 +1005,6 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
     mes_ano = datetime.now().strftime("/%m/%Y")
     all_texts = []
 
-    # Cache de UF já perguntadas nesta execução (evita perguntar duas vezes o mesmo site)
     _uf_cache = {}
 
     for idx, row in df_atividades.iterrows():
@@ -1071,18 +1019,6 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
             freq_234   = str(row.get("2G|3G|4G",   "")).strip()
             freq_5g    = str(row.get("5G",          "")).strip()
 
-            # ─────────────────────────────────────────────────────────────
-            # AJUSTE CIRÚRGICO 2 — busca PCI/AZIMUTH/UF na Base_4G
-            #
-            # Estratégia em dois passos:
-            #   Passo A (restrito): lat + lon + cidade — match exato, mais confiável
-            #   Passo B (relaxado): só lat + lon       — fallback quando cidade diverge
-            #
-            # Isso resolve o caso mais comum de falha: cidade com grafia diferente
-            # (ex: "SAO PAULO" vs "SÃO PAULO", "RIBEIRAO" vs "RIBEIRÃO PRETO").
-            # ─────────────────────────────────────────────────────────────
-
-            # Passo A: match com cidade
             matches = pd.DataFrame()
             if cidade:
                 mask_a = df_base.apply(
@@ -1095,28 +1031,22 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
                 )
                 matches = df_base[mask_a]
 
-            # Passo B: fallback só por lat/lon (tolerância 0.002°)
             if matches.empty:
                 matches = _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002)
 
-            # ── Extrair PCI e AZIMUTH ────────────────────────────────────
             pci_list = [str(int(v)) for v in matches["PCI"].dropna().unique()]    if "PCI"     in matches.columns else []
             az_list  = [str(int(v)) for v in matches["AZIMUTH"].dropna().unique()] if "AZIMUTH" in matches.columns else []
             pci_str  = "/".join(unique_preserve_order(pci_list))
             az_str   = "/".join(unique_preserve_order(az_list))
 
-            # ── Aviso quando PCI/AZIMUTH não forem encontrados ───────────
-            # (para o usuário conferir e preencher manualmente se necessário)
             if not pci_str:
                 print(f"   ⚠️  PCI não encontrado para o site {site} ({cidade}) — confira manualmente.")
             if not az_str:
                 print(f"   ⚠️  AZIMUTH não encontrado para o site {site} ({cidade}) — confira manualmente.")
 
-            # ── FIX UF vazia — sequência de 3 tentativas ────────────────
             if not uf or uf in ("", "NAN", "NONE"):
                 uf_base = ""
 
-                # Tentativa 1: extrair do match já obtido acima
                 if not matches.empty and "[P]UF" in matches.columns:
                     ufs = matches["[P]UF"].dropna().unique()
                     if len(ufs) > 0:
@@ -1126,11 +1056,9 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
                     uf = uf_base
                     print(f"   ℹ️  UF do site {site} detectada na Base_4G: {uf}")
                 else:
-                    # Tentativa 2: cache desta execução
                     if site in _uf_cache:
                         uf = _uf_cache[site]
                     else:
-                        # Tentativa 3: perguntar ao usuário
                         print(f"\n⚠️  UF não encontrada para o site {site} ({cidade}).")
                         while True:
                             resp = input(f"   Informe a UF (ex: SP, MG, RJ): ").strip().upper()
@@ -1140,7 +1068,6 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
                                 break
                             print("   ⚠️  UF inválida. Digite apenas 2 letras (ex: SP).")
 
-            # ── Montar corpo do relatório ────────────────────────────────────
             lines = [
                 f"{site}",
                 "",
@@ -1175,7 +1102,6 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
                 "",
             ]
 
-            # ── Nome do log — menor banda 4G ────────────────────────────
             si  = remove_acentos(integracao).replace(" ", "_")
             ss  = remove_acentos(site).replace(" ", "_")
             sc  = remove_acentos(cidade).replace(" ", "_")
@@ -1207,20 +1133,7 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
 # ============================================================
 
 def carregar_hoteis():
-    """
-    Lê a planilha HOTEIS diretamente do Google Sheets via ID fixo.
-
-    Planilha: https://docs.google.com/spreadsheets/d/HOTEIS_SHEET_ID
-    Aba identificada pelo gid HOTEIS_GID (965678690).
-
-    Colunas esperadas (aceita variações de nome, case-insensitive, sem acento):
-      NOME | CIDADE | LATITUDE | LONGITUDE | TELEFONE | ULTIMO_VALOR
-
-    Fallback: se não conseguir acessar o Sheets, tenta HOTEIS.xlsx local.
-    """
-
     def _parse_hoteis(cabecalhos_raw, linhas):
-        """Converte cabeçalhos + linhas brutas em lista de dicts de hotéis."""
         cabecalhos = [
             unicodedata.normalize("NFKD", str(c).strip().upper())
             .encode("ascii", errors="ignore").decode("utf-8")
@@ -1268,19 +1181,16 @@ def carregar_hoteis():
             })
         return hoteis
 
-    # ── Tentativa principal: Google Sheets pelo ID fixo ───────────────────────
     try:
         client  = conectar_sheets()
         sh      = client.open_by_key(HOTEIS_SHEET_ID)
 
-        # Localizar a aba pelo gid — mais confiável que buscar pelo nome
         ws_h = None
         for aba in sh.worksheets():
             if aba.id == HOTEIS_GID:
                 ws_h = aba
                 break
 
-        # Fallback: primeira aba caso o gid não bata (planilha reformatada)
         if ws_h is None:
             ws_h = sh.get_worksheet(0)
             print(f"   ℹ️  Aba com gid {HOTEIS_GID} não encontrada — usando primeira aba.")
@@ -1300,7 +1210,6 @@ def carregar_hoteis():
     except Exception as e:
         print(f"   ⚠️  Erro ao acessar HOTEIS no Google Sheets: {e}")
 
-    # ── Fallback: HOTEIS.xlsx local ───────────────────────────────────────────
     print("   → Tentando fallback: HOTEIS.xlsx local...")
     if not HOTEIS_PATH.exists():
         print("   ⚠️  HOTEIS.xlsx também não encontrado — hoteis não serão exibidos.")
@@ -1314,7 +1223,6 @@ def carregar_hoteis():
             .str.encode("ascii", errors="ignore")
             .str.decode("utf-8")
         )
-        # Reutiliza _parse_hoteis convertendo o DataFrame em listas
         cabecalhos = list(df.columns)
         linhas = df.astype(str).values.tolist()
         hoteis = _parse_hoteis(cabecalhos, linhas)
@@ -1325,29 +1233,19 @@ def carregar_hoteis():
         return []
 
 
-def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
+def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None, historico_meses=None):
     """
     Gera MAPA_ROTAS.html com HTML/JS puro (sem folium).
-
-    Cores:
-      🏠 verde  = ponto de partida (localização atual)
-      🔵 azul   = atividade pendente (entra na rota)
-      ✅ verde  = concluída (sem rota, só marcador)
-      ❌ vermelho = improdutiva (sem rota, só marcador)
+    Inclui busca global de sites em todos os meses anteriores.
     """
     import json
 
-    ST_CONC = "✓ Atividade concluída"
-    ST_IMPR = "IMPRODUTIVO"
-
-    # Carregar hoteis da planilha HOTEIS.xlsx
     hoteis = carregar_hoteis()
 
-    # Montar pontos da rota (pendentes)
     pontos_rota = []
     for _, row in df_rota.iterrows():
-        lat = safe_float(row.get("LAT", 0))
-        lon = safe_float(row.get("LONG", 0))
+        lat = normalizar_coord_mapa(row.get("LAT", 0), 90)
+        lon = normalizar_coord_mapa(row.get("LONG", 0), 180)
         if lat == 0 and lon == 0:
             continue
         pontos_rota.append({
@@ -1360,16 +1258,14 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
             "lon":    lon,
         })
 
-    # Montar pontos fixos (concluídas / improdutivas)
     pontos_fixos = []
     if df_fixas is not None and not df_fixas.empty:
         for _, row in df_fixas.iterrows():
-            lat = safe_float(row.get("LAT", 0))
-            lon = safe_float(row.get("LONG", 0))
+            lat = normalizar_coord_mapa(row.get("LAT", 0), 90)
+            lon = normalizar_coord_mapa(row.get("LONG", 0), 180)
             if lat == 0 and lon == 0:
                 continue
             status = str(row.get("STATUS", "")).strip()
-            tipo = "concluida" if ST_CONC in status else "improdutiva"
             pontos_fixos.append({
                 "id":        str(row.get("SITE",      "")),
                 "cidade":    str(row.get("CIDADE",    "")),
@@ -1377,17 +1273,17 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
                 "tec5g":     str(row.get("5G",        "")),
                 "concluido": str(row.get("CONCLUIDO", "") or ""),
                 "hotel":     str(row.get("HOTEL",     "") or ""),
-                "tipo":      tipo,
+                "status":    status,
+                "tipo":      tipo_status_mapa(status),
                 "lat":       lat,
                 "lon":       lon,
             })
 
-    # Montar pontos aguardando
     pontos_aguard = []
     if df_aguardando is not None and not df_aguardando.empty:
         for _, row in df_aguardando.iterrows():
-            lat = safe_float(row.get("LAT", 0))
-            lon = safe_float(row.get("LONG", 0))
+            lat = normalizar_coord_mapa(row.get("LAT", 0), 90)
+            lon = normalizar_coord_mapa(row.get("LONG", 0), 180)
             if lat == 0 and lon == 0:
                 continue
             pontos_aguard.append({
@@ -1408,7 +1304,10 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
     j_aguard = json.dumps(pontos_aguard, ensure_ascii=False)
     j_hoteis = json.dumps(hoteis,        ensure_ascii=False)
     j_part   = json.dumps(partida,       ensure_ascii=False)
+    j_hist   = json.dumps(historico_meses or {}, ensure_ascii=False)
 
+    # ATENÇÃO: dentro desta f-string todo { } que for JavaScript
+    # precisa ser {{ }} para o Python não confundir com interpolação.
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1427,14 +1326,23 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
     position:absolute;top:10px;right:10px;z-index:1000;
     background:rgba(255,255,255,0.96);border-radius:10px;
     padding:14px 18px;box-shadow:0 4px 18px rgba(0,0,0,0.18);
-    font-family:'Segoe UI',sans-serif;min-width:190px;
+    font-family:'Segoe UI',sans-serif;min-width:230px;max-width:300px;
   }}
   #painel h4{{margin:0 0 10px;font-size:14px;font-weight:700;color:#1a237e;letter-spacing:.5px;}}
+  .tabs-mapa{{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;}}
+  .tab-mapa{{
+    border:1px solid #cfd6e6;background:#f7f9ff;color:#1a237e;border-radius:6px;
+    padding:7px 8px;font-size:12px;font-weight:700;cursor:pointer;
+  }}
+  .tab-mapa.ativo{{background:#1a237e;color:#fff;border-color:#1a237e;}}
+  .tab-panel{{display:none;}}
+  .tab-panel.ativo{{display:block;}}
   .leg{{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:#333;}}
   .dot{{width:13px;height:13px;border-radius:50%;display:inline-block;flex-shrink:0;}}
   .dot-pend{{background:#2A52BE;}}
   .dot-conc{{background:#27ae60;}}
   .dot-impr{{background:#e74c3c;}}
+  .dot-canc{{background:#7f8c8d;}}
   .dot-part{{background:#f39c12;border:2px solid #b7770d;}}
   .dot-hotel{{background:#e67e22;}}
   .dot-aguard{{background:#8e44ad;border:2px solid #6c3483;}}
@@ -1444,244 +1352,655 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
   .filtro{{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:12px;color:#444;cursor:pointer;user-select:none;}}
   .filtro input[type=checkbox]{{width:14px;height:14px;cursor:pointer;accent-color:#1a237e;flex-shrink:0;}}
   .filtro span.dot{{flex-shrink:0;}}
-  #filtros-label{{font-size:11px;font-weight:700;color:#888;letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;}}
+  #filtros-label,.busca-site-label,.anteriores-label{{
+    font-size:11px;font-weight:700;color:#888;letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;
+  }}
+  .busca-site-wrap{{margin-top:10px;padding-top:10px;border-top:1px solid #ddd;}}
+  .busca-site-label{{display:block;}}
+  .busca-site-row{{display:flex;gap:6px;align-items:center;}}
+  #busca-site{{
+    flex:1;min-width:0;border:1px solid #cfd6e6;border-radius:6px;
+    padding:8px 9px;font-size:13px;outline:none;
+    font-family:'Segoe UI',sans-serif;text-transform:uppercase;
+  }}
+  #busca-site:focus,.select-ant:focus{{border-color:#2A52BE;box-shadow:0 0 0 2px rgba(42,82,190,.14);}}
+  #btn-busca-site,.btn-ant{{
+    border:none;border-radius:6px;background:#1a237e;color:white;font-weight:700;cursor:pointer;
+  }}
+  #btn-busca-site{{width:34px;height:34px;line-height:1;}}
+  #btn-busca-site:hover,.btn-ant:hover{{background:#121858;}}
+  #msg-busca-site,#msg-ant{{
+    min-height:16px;margin-top:5px;font-size:11px;color:#b35b00;
+    opacity:0;transition:opacity .18s ease;
+  }}
+  #msg-busca-site.visivel,#msg-ant.visivel{{opacity:1;}}
+  #resultado-busca-global{{
+    display:none;position:absolute;top:88px;right:330px;z-index:1002;
+    width:min(360px,calc(100vw - 24px));max-height:64vh;overflow:auto;
+    background:rgba(255,255,255,.98);border-radius:10px;
+    box-shadow:0 6px 24px rgba(0,0,0,.22);font-family:'Segoe UI',sans-serif;
+    padding:12px 14px;
+  }}
+  #resultado-busca-global.visivel{{display:block;}}
+  .busca-global-topo{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}}
+  .busca-global-titulo{{font-size:13px;font-weight:700;color:#1a237e;line-height:1.25;}}
+  #fechar-busca-global{{
+    width:26px;height:26px;border:none;border-radius:6px;background:#eef1f7;
+    color:#1a237e;font-weight:800;cursor:pointer;line-height:1;
+  }}
+  #fechar-busca-global:hover{{background:#dfe5f1;}}
+  .busca-global-item{{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    border-top:1px solid #e6e8ef;padding:8px 0;font-size:12px;color:#333;
+  }}
+  .busca-global-item:first-child{{border-top:none;}}
+  .busca-global-site{{font-weight:700;color:#1a237e;}}
+  .busca-global-ver{{
+    border:none;border-radius:6px;background:#1a237e;color:white;
+    font-size:11px;font-weight:700;padding:6px 9px;cursor:pointer;white-space:nowrap;
+  }}
+  .busca-global-ver:hover{{background:#121858;}}
+  @media (max-width: 768px){{
+    #resultado-busca-global{{right:52px;top:92px;width:calc(100vw - 68px);max-height:56vh;}}
+  }}
+  .anteriores-grid{{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px;}}
+  .select-ant{{width:100%;border:1px solid #cfd6e6;border-radius:6px;padding:8px 7px;font-size:12px;background:#fff;}}
+  .btn-ant{{width:100%;padding:9px;margin-top:8px;font-size:12px;}}
+  .partida-pulse{{
+    width:30px;height:30px;border-radius:50%;position:relative;
+    background:rgba(243,156,18,.96);border:3px solid #fff;
+    box-shadow:0 2px 9px rgba(0,0,0,.28);
+  }}
+  .partida-pulse:before,.partida-pulse:after{{
+    content:"";position:absolute;inset:-8px;border-radius:50%;
+    border:2px solid rgba(243,156,18,.55);
+    animation:dtPulse 1.9s ease-out infinite;pointer-events:none;
+  }}
+  .partida-pulse:after{{animation-delay:.65s;}}
+  .partida-core{{
+    position:absolute;left:50%;top:50%;width:9px;height:9px;border-radius:50%;
+    background:#fff;transform:translate(-50%,-50%);
+    box-shadow:0 0 0 2px rgba(183,119,13,.55);
+  }}
+  .partida-orbit{{
+    position:absolute;left:50%;top:50%;width:40px;height:40px;margin:-20px 0 0 -20px;
+    border-radius:50%;border:2px dashed rgba(26,35,126,.55);
+    animation:dtSpin 3.8s linear infinite;pointer-events:none;
+  }}
+  @keyframes dtPulse{{0%{{transform:scale(.55);opacity:.85;}}70%{{transform:scale(1.55);opacity:0;}}100%{{transform:scale(1.55);opacity:0;}}}}
+  @keyframes dtSpin{{to{{transform:rotate(360deg);}}}}
   .tip-site{{font-weight:bold;font-size:13px;color:#1a237e;}}
-  .tip-hotel{{font-weight:bold;font-size:14px;color:#d35400;
-    background:white;border:2px solid #e67e22;padding:4px 7px;border-radius:4px;}}
+  .tip-hotel{{font-weight:bold;font-size:14px;color:#d35400;background:white;border:2px solid #e67e22;padding:4px 7px;border-radius:4px;}}
   .tip-conc{{font-size:13px;color:#27ae60;font-weight:600;}}
   .tip-impr{{font-size:13px;color:#e74c3c;font-weight:600;}}
+  .tip-canc{{font-size:13px;color:#7f8c8d;font-weight:600;}}
   .popup-box{{font-family:'Segoe UI',sans-serif;font-size:13px;min-width:200px;}}
   .popup-box b{{color:#1a237e;}}
   .popup-status{{margin-top:6px;padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;}}
   .ps-conc{{background:#d4edda;color:#155724;}}
   .ps-impr{{background:#f8d7da;color:#721c24;}}
+  .ps-canc{{background:#eceff1;color:#455a64;}}
   .btn-concluir{{
     margin-top:10px;background:#27ae60;color:white;border:none;
     padding:10px;border-radius:5px;cursor:pointer;width:100%;
     font-weight:700;font-size:15px;letter-spacing:.3px;
   }}
   .btn-concluir:hover{{background:#1e8449;}}
+  #painel-toggle{{display:none;}}
+  @media (max-width: 768px){{
+    #painel{{
+      top:10px;right:10px;width:min(300px,82vw);min-width:0;max-height:82vh;overflow:auto;
+      transform:translateX(calc(100% + 24px));transition:transform .24s ease;
+      border-radius:10px 0 0 10px;
+    }}
+    body.painel-aberto #painel{{transform:translateX(0);}}
+    #painel-toggle{{
+      display:flex;position:absolute;right:0;top:145px;z-index:1001;
+      width:38px;height:118px;border:none;border-radius:14px 0 0 14px;
+      background:rgba(255,255,255,.96);box-shadow:0 4px 18px rgba(0,0,0,.2);
+      align-items:center;justify-content:center;flex-direction:column;gap:10px;cursor:pointer;
+    }}
+    #painel-toggle span{{width:7px;height:7px;border-radius:50%;background:#111;display:block;}}
+    body.painel-aberto #painel-toggle{{display:none;}}
+  }}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<button id="painel-toggle" type="button" aria-label="Abrir painel"><span></span><span></span><span></span></button>
 <div id="painel">
-  <h4>🗺 DT 3.0 — Rota</h4>
-  <div class="leg"><span class="dot dot-part"></span> Ponto de partida</div>
-  <div class="leg"><span class="dot dot-pend"></span> Pendente (rota ativa)</div>
-  <div id="contador">
-    Pendentes: <span id="cnt-pend">0</span> |
-    Concluidas: <span id="cnt-conc">0</span>
+  <h4>DT 3.0 — Rota</h4>
+  <div class="tabs-mapa">
+    <button class="tab-mapa ativo" id="tab-atual" type="button">Atual</button>
+    <button class="tab-mapa" id="tab-anteriores" type="button">Anteriores</button>
   </div>
-  <hr class="sep"/>
-  <div id="filtros-label">Exibir camadas</div>
-  <label class="filtro">
-    <input type="checkbox" id="chk-conc" checked/>
-    <span class="dot dot-conc"></span> Concluidas
-  </label>
-  <label class="filtro">
-    <input type="checkbox" id="chk-impr" checked/>
-    <span class="dot dot-impr"></span> Improdutivas
-  </label>
-  <label class="filtro">
-    <input type="checkbox" id="chk-hotel" checked/>
-    <span class="dot dot-hotel"></span> Hoteis
-  </label>
-  <label class="filtro">
-    <input type="checkbox" id="chk-aguard" checked/>
-    <span class="dot dot-aguard"></span> Aguardando
-  </label>
+
+  <div class="tab-panel ativo" id="pane-atual">
+    <div class="leg"><span class="dot dot-part"></span> Ponto de partida</div>
+    <div class="leg"><span class="dot dot-pend"></span> Pendente (rota ativa)</div>
+    <div id="contador">
+      Pendentes: <span id="cnt-pend">0</span> |
+      Concluidas: <span id="cnt-conc">0</span>
+    </div>
+    <div class="busca-site-wrap">
+      <label class="busca-site-label" for="busca-site">Buscar site</label>
+      <div class="busca-site-row">
+        <input id="busca-site" type="text" placeholder="Ex: MG-ABC" autocomplete="off"/>
+        <button id="btn-busca-site" type="button" title="Encontrar site">&#8981;</button>
+      </div>
+      <div id="msg-busca-site" aria-live="polite"></div>
+    </div>
+    <hr class="sep"/>
+    <div id="filtros-label">Exibir camadas</div>
+    <label class="filtro"><input type="checkbox" id="chk-conc" checked/><span class="dot dot-conc"></span> Concluidas</label>
+    <label class="filtro"><input type="checkbox" id="chk-impr" checked/><span class="dot dot-impr"></span> Improdutivas</label>
+    <label class="filtro"><input type="checkbox" id="chk-canc" checked/><span class="dot dot-canc"></span> Canceladas</label>
+    <label class="filtro"><input type="checkbox" id="chk-hotel" checked/><span class="dot dot-hotel"></span> Hoteis</label>
+    <label class="filtro"><input type="checkbox" id="chk-aguard" checked/><span class="dot dot-aguard"></span> Aguardando</label>
+  </div>
+
+  <div class="tab-panel" id="pane-anteriores">
+    <div class="anteriores-label">Consultar periodo</div>
+    <div class="anteriores-grid">
+      <select class="select-ant" id="sel-ano-ant"></select>
+      <select class="select-ant" id="sel-mes-ant"></select>
+    </div>
+    <button class="btn-ant" id="btn-ant-ok" type="button">OK</button>
+    <button class="btn-ant" id="btn-voltar-atual" type="button" style="background:#6c757d;">Voltar ao atual</button>
+    <div id="msg-ant" aria-live="polite"></div>
+  </div>
 </div>
+
+<!-- Painel de resultado da busca global — fica fora do #painel para não ser afetado pelo overflow -->
+<div id="resultado-busca-global" aria-live="polite">
+  <div class="busca-global-topo">
+    <div class="busca-global-titulo" id="busca-global-titulo"></div>
+    <button id="fechar-busca-global" type="button" title="Fechar">X</button>
+  </div>
+  <div id="busca-global-lista"></div>
+</div>
+
 <script>
 var map = L.map("map").setView([{lat0},{lon0}], 7);
 L.tileLayer("https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",
   {{attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',maxZoom:19}}).addTo(map);
 
-var PARTIDA   = {j_part};
-var ROTA      = {j_rota};
-var FIXOS     = {j_fixos};
-var AGUARD    = {j_aguard};
-var HOTEIS    = {j_hoteis};
+var PARTIDA    = {j_part};
+var ROTA       = {j_rota};
+var FIXOS      = {j_fixos};
+var AGUARD     = {j_aguard};
+var HOTEIS     = {j_hoteis};
+var ANTERIORES = {j_hist};
 
-// contador de marcações manuais feitas no mapa nesta sessão
-var concCount = 0;
+var concCount  = 0;
+var indiceSites = {{}};
+var buscaTimer  = null;
+var modoAnterior = false;
+var mkHist = [];
+var ocorrenciasBuscaGlobal = [];
 
-// ── Ícones ──────────────────────────────────────────────────────────────────
-function mkIcon(color, icon){{
-  return L.AwesomeMarkers.icon({{icon:icon, markerColor:color, prefix:'glyphicon'}});
+/* ── Utilitários ───────────────────────────────────────────── */
+
+function normalizarBuscaSite(valor) {{
+  return String(valor || '').trim().toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9]/g, '');
 }}
-var icPartida  = mkIcon('orange', 'star');
-var icPend     = mkIcon('blue',   'map-marker');
-var icConc     = mkIcon('green',  'ok-sign');
-var icImpr     = mkIcon('red',    'remove-sign');
-var icHotel    = mkIcon('orange', 'tower');
 
-// ── Hotéis ───────────────────────────────────────────────────────────────────
+function registrarSiteBusca(site, marker, lat, lon, listaCamada) {{
+  var chave = normalizarBuscaSite(site);
+  if (!chave) return;
+  var item = {{site: site, marker: marker, lat: lat, lon: lon, listaCamada: listaCamada || null}};
+  indiceSites[chave] = item;
+  if (chave.length >= 3) indiceSites[chave.slice(-3)] = item;
+}}
+
+function mostrarMensagem(elId, texto) {{
+  var msg = document.getElementById(elId);
+  msg.textContent = texto || '';
+  msg.classList.toggle('visivel', Boolean(texto));
+  if (elId === 'msg-busca-site') {{
+    if (buscaTimer) clearTimeout(buscaTimer);
+    if (texto) buscaTimer = setTimeout(function() {{ msg.classList.remove('visivel'); }}, 2600);
+  }}
+}}
+
+function mostrarMensagemBusca(texto) {{ mostrarMensagem('msg-busca-site', texto); }}
+
+function garantirCamadaVisivel(item) {{
+  if (item.listaCamada === 'conc')  document.getElementById('chk-conc').checked  = true;
+  if (item.listaCamada === 'impr')  document.getElementById('chk-impr').checked  = true;
+  if (item.listaCamada === 'canc')  document.getElementById('chk-canc').checked  = true;
+  if (item.listaCamada === 'aguard') document.getElementById('chk-aguard').checked = true;
+  if (item.listaCamada && !map.hasLayer(item.marker)) item.marker.addTo(map);
+}}
+
+/* ── Busca global em meses anteriores ─────────────────────── */
+
+function procurarSiteHistorico(chave) {{
+  var achados = [];
+  Object.keys(ANTERIORES).sort().reverse().forEach(function(ano) {{
+    Object.keys(ANTERIORES[ano] || {{}})
+      .sort(function(a, b) {{ return Number(b) - Number(a); }})
+      .forEach(function(mes) {{
+        var pacote = ANTERIORES[ano][mes];
+        (pacote.pontos || []).forEach(function(p) {{
+          var siteChave = normalizarBuscaSite(p.id);
+          if (siteChave === chave || (siteChave.length >= 3 && siteChave.slice(-3) === chave)) {{
+            achados.push({{ano: ano, mes: mes, label: pacote.label, ponto: p}});
+          }}
+        }});
+      }});
+  }});
+  return achados;
+}}
+
+function fecharBuscaGlobal() {{
+  document.getElementById('resultado-busca-global').classList.remove('visivel');
+}}
+
+function mostrarBuscaGlobal(chave, ocorrencias) {{
+  ocorrenciasBuscaGlobal = ocorrencias;
+  var box    = document.getElementById('resultado-busca-global');
+  var titulo = document.getElementById('busca-global-titulo');
+  var lista  = document.getElementById('busca-global-lista');
+
+  titulo.textContent = 'Site "' + document.getElementById('busca-site').value.toUpperCase() + '" encontrado em:';
+  lista.innerHTML = '';
+
+  ocorrencias.forEach(function(oc, idx) {{
+    var row   = document.createElement('div');
+    row.className = 'busca-global-item';
+
+    var texto = document.createElement('div');
+    texto.innerHTML = '<span class="busca-global-site">Site "' + oc.ponto.id + '"</span>&nbsp;' + oc.label;
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'busca-global-ver';
+    btn.textContent = 'ver';
+    btn.onclick = (function(i) {{
+      return function() {{ abrirOcorrenciaBuscaGlobal(i); }};
+    }})(idx);
+
+    row.appendChild(texto);
+    row.appendChild(btn);
+    lista.appendChild(row);
+  }});
+
+  box.classList.add('visivel');
+}}
+
+function abrirOcorrenciaBuscaGlobal(idx) {{
+  var oc = ocorrenciasBuscaGlobal[idx];
+  if (!oc) return;
+
+  /* Selecionar ano */
+  var selAno = document.getElementById('sel-ano-ant');
+  selAno.value = oc.ano;
+  var ev = document.createEvent('HTMLEvents');
+  ev.initEvent('change', true, false);
+  selAno.dispatchEvent(ev);
+
+  /* Selecionar mês */
+  document.getElementById('sel-mes-ant').value = oc.mes;
+
+  /* Ir para aba Anteriores e carregar o mês */
+  mostrarAba('anteriores');
+  mostrarMesAnterior(oc.ano, oc.mes, normalizarBuscaSite(oc.ponto.id));
+}}
+
+/* ── Busca principal ───────────────────────────────────────── */
+
+function buscarSiteNoMapa() {{
+  var chave = normalizarBuscaSite(document.getElementById('busca-site').value);
+  if (!chave) {{ mostrarMensagemBusca(''); return; }}
+
+  /* 1) Site no mês atual */
+  var item = indiceSites[chave];
+  var itemPodeAbrir = item && (item.listaCamada || map.hasLayer(item.marker));
+  if (itemPodeAbrir) {{
+    mostrarMensagemBusca('');
+    garantirCamadaVisivel(item);
+    map.closePopup();
+    map.flyTo([item.lat, item.lon], Math.max(map.getZoom(), 13), {{animate: true, duration: .85}});
+    setTimeout(function() {{ item.marker.openPopup(); }}, 900);
+    return;
+  }}
+
+  /* 2) Site em meses anteriores */
+  var ocorrencias = procurarSiteHistorico(chave);
+  if (ocorrencias.length) {{
+    mostrarMensagemBusca('');
+    mostrarBuscaGlobal(chave, ocorrencias);
+    return;
+  }}
+
+  mostrarMensagemBusca('Site não encontrado!');
+}}
+
+/* ── Ícones ────────────────────────────────────────────────── */
+
+function mkIcon(color, icon) {{
+  return L.AwesomeMarkers.icon({{icon: icon, markerColor: color, prefix: 'glyphicon'}});
+}}
+
+var icPartida = L.divIcon({{
+  className: 'partida-animada',
+  html: '<div class="partida-pulse"><span class="partida-core"></span><span class="partida-orbit"></span></div>',
+  iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -18]
+}});
+
+var icPend   = mkIcon('blue',      'map-marker');
+var icConc   = mkIcon('green',     'ok-sign');
+var icImpr   = mkIcon('red',       'remove-sign');
+var icCanc   = mkIcon('cadetblue', 'ban-circle');
+var icHotel  = mkIcon('orange',    'tower');
+var icAguard = mkIcon('purple',    'time');
+
+/* ── Hotéis ────────────────────────────────────────────────── */
+
 var mkHoteis = [];
-HOTEIS.forEach(function(h){{
-  var mk = L.marker([h.lat,h.lon],{{icon:icHotel}}).addTo(map);
-  mk.bindTooltip(h.nome,{{sticky:true,className:'tip-hotel',direction:'top'}});
+HOTEIS.forEach(function(h) {{
+  var mk = L.marker([h.lat, h.lon], {{icon: icHotel}}).addTo(map);
+  mk.bindTooltip(h.nome, {{sticky: true, className: 'tip-hotel', direction: 'top'}});
   mk.bindPopup(
-    "<div class='popup-box'>"+
-    "<b>"+h.nome+"</b><br>"+
-    (h.cidade ? "<b>Cidade:</b> "+h.cidade+"<br>" : "")+
-    (h.tel    ? "<b>Telefone:</b> "+h.tel+"<br>"  : "")+
-    (h.valor  ? "<b>Ultimo valor:</b> R$ "+h.valor+"<br>" : "")+
-    "<div class='popup-status' style='background:#fef3e2;color:#b7600a;margin-top:6px;"+
-    "padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;'>"+
-    "🏨 Hotel / Pousada</div>"+
-    "</div>"
+    "<div class='popup-box'><b>" + h.nome + "</b><br>" +
+    (h.cidade ? "<b>Cidade:</b> " + h.cidade + "<br>" : "") +
+    (h.tel    ? "<b>Telefone:</b> " + h.tel  + "<br>" : "") +
+    (h.valor  ? "<b>Ultimo valor:</b> R$ " + h.valor + "<br>" : "") +
+    "<div class='popup-status' style='background:#fef3e2;color:#b7600a;'>Hotel / Pousada</div></div>"
   );
   mkHoteis.push(mk);
 }});
 
-// ── Ponto de partida ─────────────────────────────────────────────────────────
-var mkPartida = L.marker([PARTIDA.lat,PARTIDA.lon],{{icon:icPartida}})
+/* ── Ponto de partida ──────────────────────────────────────── */
+
+var mkPartida = L.marker([PARTIDA.lat, PARTIDA.lon], {{icon: icPartida}})
   .addTo(map)
-  .bindTooltip("📍 Partida: "+PARTIDA.cidade,{{sticky:true,className:'tip-site'}})
-  .bindPopup("<div class='popup-box'><b>Ponto de partida</b><br>"+PARTIDA.cidade+"</div>");
+  .bindTooltip("Partida: " + PARTIDA.cidade, {{sticky: true, className: 'tip-site'}})
+  .bindPopup("<div class='popup-box'><b>Ponto de partida</b><br>" + PARTIDA.cidade + "</div>");
 
-// ── Rota e polilinha ──────────────────────────────────────────────────────────
-var marcadores = [];   // só pendentes, na ordem da rota
+/* ── Estado global ─────────────────────────────────────────── */
+
+var marcadores = [];
 var polyline;
+var mkConc   = [];
+var mkImpr   = [];
+var mkCanc   = [];
+var mkAguard = [];
 
-function coordsRota(){{
-  var pts = [[PARTIDA.lat,PARTIDA.lon]];
-  marcadores.forEach(function(m){{
-    if(map.hasLayer(m.marker)) pts.push([m.lat,m.lon]);
-  }});
+function coordsRota() {{
+  var pts = [[PARTIDA.lat, PARTIDA.lon]];
+  marcadores.forEach(function(m) {{ if (map.hasLayer(m.marker)) pts.push([m.lat, m.lon]); }});
   return pts;
 }}
 
-function redesenharRota(){{
-  if(polyline) map.removeLayer(polyline);
+function redesenharRota() {{
+  if (polyline) map.removeLayer(polyline);
   var pts = coordsRota();
-  if(pts.length > 1){{
-    polyline = L.polyline(pts,{{color:'#2A52BE',weight:4,opacity:0.65,
-      dashArray: null}}).addTo(map);
-  }}
-  // Atualizar contador
-  var pend = marcadores.filter(function(m){{return map.hasLayer(m.marker);}}).length;
-  var concFixas = FIXOS.filter(function(p){{return p.tipo === 'concluida';}}).length;
+  if (pts.length > 1)
+    polyline = L.polyline(pts, {{color: '#2A52BE', weight: 4, opacity: 0.65}}).addTo(map);
+  var pend      = marcadores.filter(function(m) {{ return map.hasLayer(m.marker); }}).length;
+  var concFixas = FIXOS.filter(function(p) {{ return p.tipo === 'concluida'; }}).length;
   document.getElementById('cnt-pend').textContent = pend;
   document.getElementById('cnt-conc').textContent = concFixas + concCount;
 }}
 
-ROTA.forEach(function(p, idx){{
-  var marker = L.marker([p.lat,p.lon],{{icon:icPend}}).addTo(map);
+function popupFixo(p, statusHtml) {{
+  var freqStr = [p.tec4g, p.tec5g].filter(Boolean).join(' | ');
+  return "<div class='popup-box'>" +
+    "<b>" + p.id + "</b><br>" +
+    "<b>Cidade:</b> " + p.cidade + "<br>" +
+    (freqStr     ? "<b>Freq:</b> "  + freqStr     + "<br>" : "") +
+    (p.concluido ? "<b>Obs:</b> "   + p.concluido + "<br>" : "") +
+    (p.hotel     ? "<b>Hotel:</b> " + p.hotel     + "<br>" : "") +
+    statusHtml + "</div>";
+}}
 
-  var tip = "SITE: "+p.id+"<br>"+p.cidade;
-  marker.bindTooltip(tip,{{sticky:true,className:'tip-site'}});
+function dadosTipo(p) {{
+  if (p.tipo === 'concluida')
+    return {{icon: icConc, cls: 'tip-conc', label: '✓ ', layer: 'conc',
+             status: "<div class='popup-status ps-conc'>✓ Atividade concluída</div>"}};
+  if (p.tipo === 'cancelada')
+    return {{icon: icCanc, cls: 'tip-canc', label: '⊘ ', layer: 'canc',
+             status: "<div class='popup-status ps-canc'>Cancelada</div>"}};
+  return {{icon: icImpr, cls: 'tip-impr', label: '✗ ', layer: 'impr',
+           status: "<div class='popup-status ps-impr'>✗ Improdutiva</div>"}};
+}}
+
+/* ── Rota ativa (pendentes) ────────────────────────────────── */
+
+ROTA.forEach(function(p) {{
+  var marker = L.marker([p.lat, p.lon], {{icon: icPend}}).addTo(map);
+  marker.bindTooltip("SITE: " + p.id + "<br>" + p.cidade, {{sticky: true, className: 'tip-site'}});
 
   var pop = document.createElement('div');
   pop.className = 'popup-box';
   var freqStr = [p.tec4g, p.tec5g].filter(Boolean).join(' | ');
   pop.innerHTML =
-    "<b>"+p.id+"</b><br>"+
-    "<b>Cidade:</b> "+p.cidade+"<br>"+
-    (freqStr ? "<b>Freq:</b> "+freqStr+"<br>" : "")+
-    (p.hotel  ? "<b>Hotel:</b> "+p.hotel+"<br>" : "");
+    "<b>" + p.id + "</b><br><b>Cidade:</b> " + p.cidade + "<br>" +
+    (freqStr ? "<b>Freq:</b> " + freqStr + "<br>" : "") +
+    (p.hotel ? "<b>Hotel:</b> " + p.hotel + "<br>" : "");
 
   var btn = document.createElement('button');
   btn.className = 'btn-concluir';
-  btn.innerHTML = '✓ Marcar como Concluída';
-  btn.onclick = function(){{
+  btn.innerHTML = '&#10003; Marcar como Conclu&#237;da';
+  btn.onclick = function() {{
     map.removeLayer(marker);
-    // Adiciona marcador verde no lugar
-    var mk2 = L.marker([p.lat,p.lon],{{icon:icConc}}).addTo(map);
-    mk2.className = 'marcador-conc';   // para contagem
-    mk2.bindTooltip("✓ "+p.id,{{sticky:true,className:'tip-conc'}});
-    mk2.bindPopup("<div class='popup-box'><b>"+p.id+"</b><br>"+p.cidade+
-      "<div class='popup-status ps-conc'>✓ Concluída</div></div>");
+    concCount += 1;
+    var mk2 = L.marker([p.lat, p.lon], {{icon: icConc}}).addTo(map);
+    mk2.bindTooltip("✓ " + p.id, {{sticky: true, className: 'tip-conc'}});
+    mk2.bindPopup("<div class='popup-box'><b>" + p.id + "</b><br>" + p.cidade +
+                  "<div class='popup-status ps-conc'>✓ Concluída</div></div>");
+    registrarSiteBusca(p.id, mk2, p.lat, p.lon, null);
     redesenharRota();
   }};
   pop.appendChild(btn);
   marker.bindPopup(pop);
-
-  marcadores.push({{marker:marker, lat:p.lat, lon:p.lon}});
+  marcadores.push({{marker: marker, lat: p.lat, lon: p.lon}});
+  registrarSiteBusca(p.id, marker, p.lat, p.lon, null);
 }});
 
-// ── Fixos (concluídas / improdutivas do mês) ─────────────────────────────────
-var mkConc = [];
-var mkImpr = [];
-FIXOS.forEach(function(p){{
-  var ic  = p.tipo === 'concluida' ? icConc : icImpr;
-  var cls = p.tipo === 'concluida' ? 'tip-conc' : 'tip-impr';
-  var label = p.tipo === 'concluida' ? '✓ ' : '✗ ';
-  var mk = L.marker([p.lat,p.lon],{{icon:ic}}).addTo(map);
-  mk.bindTooltip(label+p.id,{{sticky:true,className:cls}});
-  var statusHtml = p.tipo === 'concluida'
-    ? "<div class='popup-status ps-conc'>✓ Atividade concluída</div>"
-    : "<div class='popup-status ps-impr'>✗ Improdutiva</div>";
-  var freqStr = [p.tec4g,p.tec5g].filter(Boolean).join(' | ');
-  mk.bindPopup(
-    "<div class='popup-box'>"+
-    "<b>"+p.id+"</b><br>"+
-    "<b>Cidade:</b> "+p.cidade+"<br>"+
-    (freqStr ? "<b>Freq:</b> "+freqStr+"<br>" : "")+
-    (p.concluido ? "<b>Obs:</b> "+p.concluido+"<br>" : "")+
-    (p.hotel     ? "<b>Hotel:</b> "+p.hotel+"<br>" : "")+
-    statusHtml+
-    "</div>"
-  );
-  if(p.tipo === 'concluida') mkConc.push(mk);
+/* ── Fixos (concluídas / improdutivas / canceladas) ────────── */
+
+FIXOS.forEach(function(p) {{
+  var d  = dadosTipo(p);
+  var mk = L.marker([p.lat, p.lon], {{icon: d.icon}}).addTo(map);
+  mk.bindTooltip(d.label + p.id, {{sticky: true, className: d.cls}});
+  mk.bindPopup(popupFixo(p, d.status));
+  registrarSiteBusca(p.id, mk, p.lat, p.lon, d.layer);
+  if (p.tipo === 'concluida')  mkConc.push(mk);
+  else if (p.tipo === 'cancelada') mkCanc.push(mk);
   else mkImpr.push(mk);
 }});
 
-// ── Aguardando para deslocar ─────────────────────────────────────────────────
-var icAguard = mkIcon('purple', 'time');
-var mkAguard = [];
-AGUARD.forEach(function(p){{
-  var mk = L.marker([p.lat,p.lon],{{icon:icAguard}}).addTo(map);
-  mk.bindTooltip("⏳ "+p.id+"<br>"+p.cidade,{{sticky:true,className:'tip-site'}});
-  var freqStr = [p.tec4g,p.tec5g].filter(Boolean).join(' | ');
+/* ── Aguardando ────────────────────────────────────────────── */
+
+AGUARD.forEach(function(p) {{
+  var mk = L.marker([p.lat, p.lon], {{icon: icAguard}}).addTo(map);
+  mk.bindTooltip("Aguardando: " + p.id + "<br>" + p.cidade, {{sticky: true, className: 'tip-site'}});
+  var freqStr = [p.tec4g, p.tec5g].filter(Boolean).join(' | ');
   mk.bindPopup(
-    "<div class='popup-box'>"+
-    "<b>"+p.id+"</b><br>"+
-    "<b>Cidade:</b> "+p.cidade+"<br>"+
-    (freqStr ? "<b>Freq:</b> "+freqStr+"<br>" : "")+
-    (p.concluido ? "<b>Motivo:</b> "+p.concluido+"<br>" : "")+
-    (p.hotel && p.hotel !== '.' ? "<b>Hotel:</b> "+p.hotel+"<br>" : "")+
-    "<div class='popup-status' style='background:#e8daef;color:#6c3483;margin-top:6px;"+
-    "padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;'>"+
-    "⏳ Aguardando para deslocar</div>"+
-    "</div>"
+    "<div class='popup-box'><b>" + p.id + "</b><br><b>Cidade:</b> " + p.cidade + "<br>" +
+    (freqStr        ? "<b>Freq:</b> "   + freqStr        + "<br>" : "") +
+    (p.concluido    ? "<b>Motivo:</b> " + p.concluido    + "<br>" : "") +
+    (p.hotel && p.hotel !== '.' ? "<b>Hotel:</b> " + p.hotel + "<br>" : "") +
+    "<div class='popup-status' style='background:#e8daef;color:#6c3483;'>Aguardando para deslocar</div></div>"
   );
+  registrarSiteBusca(p.id, mk, p.lat, p.lon, 'aguard');
   mkAguard.push(mk);
 }});
 
-// ── Checkboxes de visibilidade ────────────────────────────────────────────────
-function toggleCamada(lista, visivel){{
-  lista.forEach(function(mk){{
-    if(visivel) {{ if(!map.hasLayer(mk)) mk.addTo(map); }}
-    else        {{ if(map.hasLayer(mk))  map.removeLayer(mk); }}
+/* ── Controle de camadas ───────────────────────────────────── */
+
+function toggleCamada(lista, visivel) {{
+  lista.forEach(function(mk) {{
+    if (visivel) {{ if (!map.hasLayer(mk)) mk.addTo(map); }}
+    else         {{ if (map.hasLayer(mk))  map.removeLayer(mk); }}
   }});
 }}
 
-document.getElementById('chk-conc').addEventListener('change', function(){{
-  toggleCamada(mkConc, this.checked);
-}});
-document.getElementById('chk-impr').addEventListener('change', function(){{
-  toggleCamada(mkImpr, this.checked);
-}});
-document.getElementById('chk-hotel').addEventListener('change', function(){{
-  toggleCamada(mkHoteis, this.checked);
-}});
-document.getElementById('chk-aguard').addEventListener('change', function(){{
-  toggleCamada(mkAguard, this.checked);
-}});
+function setAtualVisivel(visivel) {{
+  if (visivel) {{
+    marcadores.forEach(function(m) {{ if (!map.hasLayer(m.marker)) m.marker.addTo(map); }});
+    toggleCamada(mkConc,   document.getElementById('chk-conc').checked);
+    toggleCamada(mkImpr,   document.getElementById('chk-impr').checked);
+    toggleCamada(mkCanc,   document.getElementById('chk-canc').checked);
+    toggleCamada(mkAguard, document.getElementById('chk-aguard').checked);
+    if (!map.hasLayer(mkPartida)) mkPartida.addTo(map);
+    redesenharRota();
+  }} else {{
+    marcadores.forEach(function(m) {{ if (map.hasLayer(m.marker)) map.removeLayer(m.marker); }});
+    toggleCamada(mkConc, false); toggleCamada(mkImpr, false);
+    toggleCamada(mkCanc, false); toggleCamada(mkAguard, false);
+    if (polyline) map.removeLayer(polyline);
+  }}
+}}
 
-// ── Inicializar ───────────────────────────────────────────────────────────────
+function limparHistorico() {{
+  mkHist.forEach(function(mk) {{ if (map.hasLayer(mk)) map.removeLayer(mk); }});
+  mkHist = [];
+}}
+
+/* ── Tabs ──────────────────────────────────────────────────── */
+
+function mostrarAba(nome) {{
+  document.getElementById('tab-atual').classList.toggle('ativo',      nome === 'atual');
+  document.getElementById('tab-anteriores').classList.toggle('ativo', nome === 'anteriores');
+  document.getElementById('pane-atual').classList.toggle('ativo',     nome === 'atual');
+  document.getElementById('pane-anteriores').classList.toggle('ativo',nome === 'anteriores');
+}}
+
+/* ── Meses anteriores ──────────────────────────────────────── */
+
+function popularMesesAnteriores() {{
+  var selAno = document.getElementById('sel-ano-ant');
+  var selMes = document.getElementById('sel-mes-ant');
+  var anos   = Object.keys(ANTERIORES).sort().reverse();
+
+  selAno.innerHTML = '';
+  if (!anos.length) {{
+    selAno.innerHTML = '<option value="">Ano</option>';
+    selMes.innerHTML = '<option value="">Mes</option>';
+    mostrarMensagem('msg-ant', 'Nenhum mês anterior disponível.');
+    return;
+  }}
+
+  anos.forEach(function(ano) {{ selAno.add(new Option(ano, ano)); }});
+
+  function preencherMeses() {{
+    var ano = selAno.value;
+    selMes.innerHTML = '';
+    Object.keys(ANTERIORES[ano] || {{}})
+      .sort(function(a, b) {{ return Number(b) - Number(a); }})
+      .forEach(function(mes) {{
+        var pacote  = ANTERIORES[ano][mes];
+        var nomeMes = pacote.label.split('/')[0];
+        var qtd     = (pacote.pontos || []).length;
+        selMes.add(new Option(nomeMes + ' (' + qtd + ')', mes));
+      }});
+  }}
+
+  selAno.addEventListener('change', preencherMeses);
+  preencherMeses();
+}}
+
+function mostrarMesAnterior(anoBusca, mesBusca, siteAbrir) {{
+  var ano    = anoBusca  || document.getElementById('sel-ano-ant').value;
+  var mes    = mesBusca  || document.getElementById('sel-mes-ant').value;
+  var pacote = ANTERIORES[ano] && ANTERIORES[ano][mes];
+
+  if (!pacote || !(pacote.pontos || []).length) {{
+    mostrarMensagem('msg-ant', 'Nenhuma atividade encontrada nesse período.');
+    return;
+  }}
+
+  modoAnterior = true;
+  mostrarMensagem('msg-ant', '');
+  limparHistorico();
+  setAtualVisivel(false);
+  map.closePopup();
+
+  var markerParaAbrir = null;
+
+  pacote.pontos.forEach(function(p) {{
+    var d  = dadosTipo(p);
+    var mk = L.marker([p.lat, p.lon], {{icon: d.icon}}).addTo(map);
+    mk.bindTooltip(d.label + p.id, {{sticky: true, className: d.cls}});
+    mk.bindPopup(popupFixo(p, d.status));
+    registrarSiteBusca(p.id, mk, p.lat, p.lon, null);
+
+    if (siteAbrir && normalizarBuscaSite(p.id) === siteAbrir && markerParaAbrir === null) {{
+      markerParaAbrir = {{marker: mk, lat: p.lat, lon: p.lon}};
+    }}
+    mkHist.push(mk);
+  }});
+
+  var concluidasHist = pacote.pontos.filter(function(p) {{ return p.tipo === 'concluida'; }}).length;
+  document.getElementById('cnt-pend').textContent = '0';
+  document.getElementById('cnt-conc').textContent = concluidasHist;
+  mostrarMensagem('msg-ant', 'Carregado: ' + pacote.label + ' — ' + pacote.pontos.length + ' atividades.');
+
+  if (mkHist.length) {{
+    setTimeout(function() {{
+      map.invalidateSize();
+      if (markerParaAbrir) {{
+        map.flyTo([markerParaAbrir.lat, markerParaAbrir.lon],
+                  Math.max(map.getZoom(), 13), {{animate: true, duration: .85}});
+        setTimeout(function() {{ markerParaAbrir.marker.openPopup(); }}, 900);
+      }} else {{
+        var grp = L.featureGroup(mkHist);
+        map.fitBounds(grp.getBounds().pad(0.16));
+      }}
+    }}, 80);
+  }}
+}}
+
+function voltarMapaAtual() {{
+  modoAnterior = false;
+  limparHistorico();
+  setAtualVisivel(true);
+  mostrarAba('atual');
+  map.closePopup();
+}}
+
+/* ── Event listeners ───────────────────────────────────────── */
+
+document.getElementById('chk-conc').addEventListener('change',  function() {{ if (!modoAnterior) toggleCamada(mkConc,   this.checked); }});
+document.getElementById('chk-impr').addEventListener('change',  function() {{ if (!modoAnterior) toggleCamada(mkImpr,   this.checked); }});
+document.getElementById('chk-canc').addEventListener('change',  function() {{ if (!modoAnterior) toggleCamada(mkCanc,   this.checked); }});
+document.getElementById('chk-hotel').addEventListener('change', function() {{ toggleCamada(mkHoteis, this.checked); }});
+document.getElementById('chk-aguard').addEventListener('change',function() {{ if (!modoAnterior) toggleCamada(mkAguard, this.checked); }});
+
+document.getElementById('btn-busca-site').addEventListener('click', buscarSiteNoMapa);
+document.getElementById('busca-site').addEventListener('keydown', function(ev) {{ if (ev.key === 'Enter') buscarSiteNoMapa(); }});
+document.getElementById('busca-site').addEventListener('input',   function()    {{ this.value = this.value.toUpperCase(); mostrarMensagemBusca(''); }});
+
+document.getElementById('tab-atual').addEventListener('click',       voltarMapaAtual);
+document.getElementById('tab-anteriores').addEventListener('click',  function() {{ mostrarAba('anteriores'); }});
+document.getElementById('btn-ant-ok').addEventListener('click',      function() {{ mostrarMesAnterior(); }});
+document.getElementById('btn-voltar-atual').addEventListener('click', voltarMapaAtual);
+document.getElementById('fechar-busca-global').addEventListener('click', fecharBuscaGlobal);
+
+/* Fechar painel no mobile ao clicar no mapa */
+var painel       = document.getElementById('painel');
+var togglePainel = document.getElementById('painel-toggle');
+togglePainel.addEventListener('click', function(ev) {{ ev.stopPropagation(); document.body.classList.add('painel-aberto'); }});
+painel.addEventListener('click', function(ev) {{ ev.stopPropagation(); }});
+map.on('click', function() {{ document.body.classList.remove('painel-aberto'); }});
+
+/* ── Init ──────────────────────────────────────────────────── */
+
 redesenharRota();
+popularMesesAnteriores();
 
-var todosMarcadores = marcadores.map(function(m){{return m.marker;}});
+var todosMarcadores = marcadores.map(function(m) {{ return m.marker; }});
 todosMarcadores.push(mkPartida);
-if(todosMarcadores.length > 0){{
+if (todosMarcadores.length > 0) {{
   var grp = L.featureGroup(todosMarcadores);
   map.fitBounds(grp.getBounds().pad(0.1));
 }}
 
-setTimeout(function(){{map.invalidateSize();}}, 400);
+setTimeout(function() {{ map.invalidateSize(); }}, 400);
 </script>
 </body>
 </html>"""
@@ -1697,15 +2016,6 @@ setTimeout(function(){{map.invalidateSize();}}, 400);
 # ============================================================
 
 def publicar_mapa_github(html_path):
-    """
-    Faz commit do MAPA_ROTAS.html no repositório GitHub configurado
-    em github_token.txt. Usa apenas a biblioteca requests — sem git.
-
-    Formato do github_token.txt (3 linhas):
-        TOKEN_AQUI
-        seu-usuario
-        nome-do-repositorio
-    """
     if not GITHUB_TOKEN_PATH.exists():
         print("   ⚠️  github_token.txt nao encontrado — publicacao no GitHub ignorada.")
         print(f"      Crie o arquivo em: {GITHUB_TOKEN_PATH}")
@@ -1725,7 +2035,6 @@ def publicar_mapa_github(html_path):
 
     import base64
 
-    # Ler HTML gerado e converter para Base64
     try:
         conteudo_bytes = html_path.read_bytes()
         conteudo_b64   = base64.b64encode(conteudo_bytes).decode("utf-8")
@@ -1740,7 +2049,6 @@ def publicar_mapa_github(html_path):
         "Accept":        "application/vnd.github+json",
     }
 
-    # Verificar se o arquivo já existe (precisamos do SHA para atualizar)
     sha_atual = None
     try:
         r = requests.get(api_url, headers=headers, timeout=10)
@@ -1750,7 +2058,6 @@ def publicar_mapa_github(html_path):
         print(f"   ❌ Erro ao consultar GitHub: {e}")
         return
 
-    # Montar payload do commit
     agora   = datetime.now().strftime("%d/%m/%Y %H:%M")
     payload = {
         "message": f"DT 3.0 — Mapa atualizado em {agora}",
@@ -1758,9 +2065,8 @@ def publicar_mapa_github(html_path):
         "branch":  "main",
     }
     if sha_atual:
-        payload["sha"] = sha_atual   # obrigatório para atualizar arquivo existente
+        payload["sha"] = sha_atual
 
-    # Enviar
     try:
         r = requests.put(api_url, headers=headers, json=payload, timeout=30)
         if r.status_code in (200, 201):
@@ -1775,18 +2081,10 @@ def publicar_mapa_github(html_path):
 
 
 # ============================================================
-# MODO MAPA — atualiza apenas o mapa a partir do Google Sheets
+# MODO MAPA
 # ============================================================
 
 def main_mapa():
-    """
-    Executa apenas o passo de mapa:
-    1. Conecta ao Google Sheets
-    2. Lê status atuais (concluídas, improdutivas, aguardando, pendentes)
-    3. Gera novo MAPA_ROTAS.html
-    4. Publica no GitHub Pages
-    Não otimiza rota, não gera relatório, não processa novas atividades.
-    """
     print("\n" + "=" * 60)
     print("  DT 3.0 — Atualizar Mapa")
     print("=" * 60)
@@ -1796,7 +2094,6 @@ def main_mapa():
         input("\nPressione ENTER para sair...")
         return
 
-    # Conectar ao Sheets
     print("\n[1/3] Conectando ao Google Sheets...")
     try:
         client = conectar_sheets()
@@ -1807,16 +2104,14 @@ def main_mapa():
         input("\nPressione ENTER para sair...")
         return
 
-    # Ler atividades
     print("\n[2/3] Lendo atividades da planilha...")
     df_sheets = ler_atividades_sheets(ws)
     print(f"   {len(df_sheets)} atividades encontradas.")
 
-    # Separar por status
-    df_fixas      = df_sheets[df_sheets["STATUS"].isin(STATUS_FIXOS)].copy()
+    df_fixas      = df_sheets[mask_status_fixos_mapa(df_sheets)].copy()
     df_aguardando = df_sheets[df_sheets["STATUS"].str.strip() == ST_AGUARDANDO].copy()
     df_pendentes  = df_sheets[
-        ~df_sheets["STATUS"].isin(STATUS_FIXOS) &
+        ~mask_status_fixos_mapa(df_sheets) &
         (df_sheets["STATUS"].str.strip() != ST_AGUARDANDO)
     ].copy()
     df_pendentes  = df_pendentes.dropna(subset=["LAT", "LONG"])
@@ -1826,14 +2121,14 @@ def main_mapa():
     print(f"   Pendentes na rota       : {len(df_pendentes)}")
     print(f"   Aguardando              : {len(df_aguardando)}")
 
-    # Determinar ponto de partida
     lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets)
 
-    # Gerar mapa com a ordem atual da planilha (sem reotimizar)
     print("\n[3/3] Gerando mapa e publicando...")
     print("   → Mapa interativo...")
+    historico_meses = carregar_meses_anteriores(sheet, ws.title)
     gerar_mapa(df_pendentes, lat0, lon0, cidade0,
-               df_fixas=df_fixas, df_aguardando=df_aguardando)
+               df_fixas=df_fixas, df_aguardando=df_aguardando,
+               historico_meses=historico_meses)
 
     print("   → Publicando no GitHub...")
     publicar_mapa_github(BASE_DIR / "MAPA_ROTAS.html")
@@ -1858,7 +2153,6 @@ def main():
     print("  DT 3.0 — Automação Drive Test")
     print("=" * 60)
 
-    # ── Verificações iniciais ──────────────────────────────
     if not CREDS_PATH.exists():
         print(f"\n❌ credentials.json não encontrado em:\n   {BASE_DIR}")
         print("   Veja o arquivo GUIA_API_GOOGLE.txt para configurar.")
@@ -1870,12 +2164,10 @@ def main():
         input("\nPressione ENTER para sair...")
         return
 
-    # ── 1. Base 4G ─────────────────────────────────────────
     print("\n[1/7] Carregando Base 4G...")
     df_base = pd.read_excel(BASE_4G_PATH, engine="openpyxl")
     print(f"   {len(df_base):,} registros.")
 
-    # ── 2. Google Sheets ───────────────────────────────────
     print("\n[2/7] Conectando ao Google Sheets...")
     try:
         client = conectar_sheets()
@@ -1886,7 +2178,6 @@ def main():
         input("\nPressione ENTER para sair...")
         return
 
-    # ── 3. Ler atividades do Sheets ────────────────────────
     print("\n[3/7] Lendo atividades da planilha...")
     df_sheets = ler_atividades_sheets(ws)
     print(f"   {len(df_sheets)} atividades encontradas.")
@@ -1894,11 +2185,9 @@ def main():
     if df_sheets.empty:
         print("   ⚠️  Planilha vazia. Continue assim que houver dados.")
 
-    # ── 4. Ponto de partida ────────────────────────────────
     print("\n[4/7] Determinando ponto de partida...")
     lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets)
 
-    # ── 5. Novas atividades ────────────────────────────────
     print("\n[5/7] Processando novas atividades...")
     arquivos_novas = encontrar_arquivos_novas()
     df_novas       = pd.DataFrame()
@@ -1919,26 +2208,21 @@ def main():
 
         if frames_novas:
             df_novas = pd.concat(frames_novas, ignore_index=True)
-            # Remover duplicatas de SITE caso o mesmo site apareça em dois arquivos
             df_novas = df_novas.drop_duplicates(subset=["SITE"], keep="first")
             print(f"   Total: {len(df_novas)} novas atividades únicas.")
     else:
         print("   Nenhuma nova atividade. Continuando sem novas.")
 
-    # ── 6. Montar pool e otimizar ──────────────────────────
     print("\n[6/7] Otimizando rota...")
 
-    # Fixas: não entram na otimização
-    df_fixas = df_sheets[df_sheets["STATUS"].isin(STATUS_FIXOS)].copy()
+    df_fixas = df_sheets[mask_status_fixos_mapa(df_sheets)].copy()
 
-    # Aguardando: ficam no final da planilha, fora da otimização
     df_aguardando = df_sheets[
         df_sheets["STATUS"].str.strip() == ST_AGUARDANDO
     ].copy()
 
-    # Pool: atividades não fixas e não "Aguardando" que estão na planilha
     df_pool_sheets = df_sheets[
-        ~df_sheets["STATUS"].isin(STATUS_FIXOS) &
+        ~mask_status_fixos_mapa(df_sheets) &
         (df_sheets["STATUS"].str.strip() != ST_AGUARDANDO)
     ].copy()
     df_pool_sheets = df_pool_sheets.dropna(subset=["LAT", "LONG"])
@@ -1946,8 +2230,6 @@ def main():
         (df_pool_sheets["LAT"] != 0) & (df_pool_sheets["LONG"] != 0)
     ]
 
-    # ── AJUSTE: complementar UF e TEC ausentes no pool do Sheets via Base_4G ──
-    # Nunca toca em STATUS, CONCLUIDO, HOTEL.
     for idx, row in df_pool_sheets.iterrows():
         precisa_uf  = not str(row.get("UF",  "")).strip()
         precisa_tec = not str(row.get("TEC", "")).strip()
@@ -1974,17 +2256,14 @@ def main():
         except Exception:
             pass
 
-    # Sites já no pool para evitar duplicatas
     sites_originais  = set(df_sheets["SITE"].str.upper())
     sites_no_pool    = set(df_pool_sheets["SITE"].str.upper())
 
-    # Novas que ainda não estão na planilha
     COLS = ["DEMANDA", "INTEGRAÇÃO", "SITE", "UF", "TEC",
             "LAT", "LONG", "CIDADE", "2G|3G|4G", "5G", "STATUS",
             "CONCLUIDO", "HOTEL"]
 
     if not df_novas.empty:
-        # Novas não têm CONCLUIDO/HOTEL — preencher vazios
         df_nov = df_novas[~df_novas["SITE"].str.upper().isin(sites_no_pool)].copy()
         for col in ("CONCLUIDO", "HOTEL"):
             if col not in df_nov.columns:
@@ -1993,7 +2272,6 @@ def main():
     else:
         df_novas_filtradas = pd.DataFrame(columns=COLS)
 
-    # Unir para otimização (pool_sheets já tem CONCLUIDO e HOTEL)
     frames = [f for f in [df_pool_sheets[COLS], df_novas_filtradas] if not f.empty]
 
     if not frames:
@@ -2006,19 +2284,20 @@ def main():
 
     rota_final = otimizar_rota(df_pool, lat0, lon0)
 
-    # ── Exportar ATIVIDADES_GERADAS.xlsx ──────────────────
     ativ_path = BASE_DIR / "ATIVIDADES_GERADAS.xlsx"
     rota_final.to_excel(ativ_path, index=False)
     print(f"   ATIVIDADES_GERADAS.xlsx salvo.")
 
-    # ── 7. Saídas ──────────────────────────────────────────
     print("\n[7/7] Gerando saídas...")
 
     print("   → Relatório de texto...")
     gerar_relatorio(rota_final, df_base, PASTA_OUT)
 
     print("   → Mapa interativo...")
-    gerar_mapa(rota_final, lat0, lon0, cidade0, df_fixas=df_fixas, df_aguardando=df_aguardando)
+    historico_meses = carregar_meses_anteriores(sheet, ws.title)
+    gerar_mapa(rota_final, lat0, lon0, cidade0,
+               df_fixas=df_fixas, df_aguardando=df_aguardando,
+               historico_meses=historico_meses)
 
     print("   → Publicando mapa no GitHub...")
     publicar_mapa_github(BASE_DIR / "MAPA_ROTAS.html")
@@ -2026,7 +2305,6 @@ def main():
     print("   → Atualizando Google Sheets...")
     atualizar_sheets(ws, df_fixas, rota_final, sites_originais, df_aguardando)
 
-    # ── Mover arquivos processados ────────────────────────
     if arquivos_novas:
         processados = PASTA_NOVAS / "processados"
         processados.mkdir(exist_ok=True)
