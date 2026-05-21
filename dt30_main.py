@@ -1330,10 +1330,10 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
     Gera MAPA_ROTAS.html com HTML/JS puro (sem folium).
 
     Cores:
-      🏠 verde  = ponto de partida (localização atual)
-      🔵 azul   = atividade pendente (entra na rota)
-      ✅ verde  = concluída (sem rota, só marcador)
-      ❌ vermelho = improdutiva (sem rota, só marcador)
+      verde = ponto de partida (localizacao atual)
+      azul = atividade pendente (entra na rota)
+      verde = concluida (sem rota, so marcador)
+      vermelho = improdutiva (sem rota, so marcador)
     """
     import json
 
@@ -1360,7 +1360,7 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
             "lon":    lon,
         })
 
-    # Montar pontos fixos (concluídas / improdutivas)
+    # Montar pontos fixos (concluidas / improdutivas)
     pontos_fixos = []
     if df_fixas is not None and not df_fixas.empty:
         for _, row in df_fixas.iterrows():
@@ -1427,7 +1427,7 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
     position:absolute;top:10px;right:10px;z-index:1000;
     background:rgba(255,255,255,0.96);border-radius:10px;
     padding:14px 18px;box-shadow:0 4px 18px rgba(0,0,0,0.18);
-    font-family:'Segoe UI',sans-serif;min-width:190px;
+    font-family:'Segoe UI',sans-serif;min-width:210px;
   }}
   #painel h4{{margin:0 0 10px;font-size:14px;font-weight:700;color:#1a237e;letter-spacing:.5px;}}
   .leg{{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:#333;}}
@@ -1445,6 +1445,58 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
   .filtro input[type=checkbox]{{width:14px;height:14px;cursor:pointer;accent-color:#1a237e;flex-shrink:0;}}
   .filtro span.dot{{flex-shrink:0;}}
   #filtros-label{{font-size:11px;font-weight:700;color:#888;letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;}}
+  .busca-site-wrap{{margin-top:10px;padding-top:10px;border-top:1px solid #ddd;}}
+  .busca-site-label{{
+    display:block;font-size:11px;font-weight:700;color:#888;
+    letter-spacing:.6px;text-transform:uppercase;margin-bottom:6px;
+  }}
+  .busca-site-row{{display:flex;gap:6px;align-items:center;}}
+  #busca-site{{
+    flex:1;min-width:0;border:1px solid #cfd6e6;border-radius:6px;
+    padding:8px 9px;font-size:13px;outline:none;
+    font-family:'Segoe UI',sans-serif;text-transform:uppercase;
+  }}
+  #busca-site:focus{{border-color:#2A52BE;box-shadow:0 0 0 2px rgba(42,82,190,.14);}}
+  #btn-busca-site{{
+    width:34px;height:34px;border:none;border-radius:6px;background:#1a237e;
+    color:white;font-weight:700;cursor:pointer;line-height:1;
+  }}
+  #btn-busca-site:hover{{background:#121858;}}
+  #msg-busca-site{{
+    min-height:16px;margin-top:5px;font-size:11px;color:#b35b00;
+    opacity:0;transition:opacity .18s ease;
+  }}
+  #msg-busca-site.visivel{{opacity:1;}}
+  .partida-pulse{{
+    width:30px;height:30px;border-radius:50%;position:relative;
+    background:rgba(243,156,18,.96);border:3px solid #fff;
+    box-shadow:0 2px 9px rgba(0,0,0,.28);
+  }}
+  .partida-pulse:before,
+  .partida-pulse:after{{
+    content:"";position:absolute;inset:-8px;border-radius:50%;
+    border:2px solid rgba(243,156,18,.55);
+    animation:dtPulse 1.9s ease-out infinite;
+    pointer-events:none;
+  }}
+  .partida-pulse:after{{animation-delay:.65s;}}
+  .partida-core{{
+    position:absolute;left:50%;top:50%;width:9px;height:9px;border-radius:50%;
+    background:#fff;transform:translate(-50%,-50%);
+    box-shadow:0 0 0 2px rgba(183,119,13,.55);
+  }}
+  .partida-orbit{{
+    position:absolute;left:50%;top:50%;width:40px;height:40px;margin:-20px 0 0 -20px;
+    border-radius:50%;border:2px dashed rgba(26,35,126,.55);
+    animation:dtSpin 3.8s linear infinite;
+    pointer-events:none;
+  }}
+  @keyframes dtPulse{{
+    0%{{transform:scale(.55);opacity:.85;}}
+    70%{{transform:scale(1.55);opacity:0;}}
+    100%{{transform:scale(1.55);opacity:0;}}
+  }}
+  @keyframes dtSpin{{to{{transform:rotate(360deg);}}}}
   .tip-site{{font-weight:bold;font-size:13px;color:#1a237e;}}
   .tip-hotel{{font-weight:bold;font-size:14px;color:#d35400;
     background:white;border:2px solid #e67e22;padding:4px 7px;border-radius:4px;}}
@@ -1466,12 +1518,20 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None, df_aguardando=None):
 <body>
 <div id="map"></div>
 <div id="painel">
-  <h4>🗺 DT 3.0 — Rota</h4>
+  <h4>DT 3.0 — Rota</h4>
   <div class="leg"><span class="dot dot-part"></span> Ponto de partida</div>
   <div class="leg"><span class="dot dot-pend"></span> Pendente (rota ativa)</div>
   <div id="contador">
     Pendentes: <span id="cnt-pend">0</span> |
     Concluidas: <span id="cnt-conc">0</span>
+  </div>
+  <div class="busca-site-wrap">
+    <label class="busca-site-label" for="busca-site">Buscar site</label>
+    <div class="busca-site-row">
+      <input id="busca-site" type="text" placeholder="Ex: MG-ABC" autocomplete="off"/>
+      <button id="btn-busca-site" type="button" title="Encontrar site">⌕</button>
+    </div>
+    <div id="msg-busca-site" aria-live="polite"></div>
   </div>
   <hr class="sep"/>
   <div id="filtros-label">Exibir camadas</div>
@@ -1503,20 +1563,100 @@ var FIXOS     = {j_fixos};
 var AGUARD    = {j_aguard};
 var HOTEIS    = {j_hoteis};
 
-// contador de marcações manuais feitas no mapa nesta sessão
+// contador de marcacoes manuais feitas no mapa nesta sessao
 var concCount = 0;
+var indiceSites = {{}};
+var buscaTimer = null;
 
-// ── Ícones ──────────────────────────────────────────────────────────────────
+function normalizarBuscaSite(valor){{
+  return String(valor || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\\s+/g, '')
+    .replace(/[^A-Z0-9]/g, '');
+}}
+
+function registrarSiteBusca(site, marker, lat, lon, listaCamada){{
+  var chave = normalizarBuscaSite(site);
+  if(!chave) return;
+  var item = {{
+    site: site,
+    marker: marker,
+    lat: lat,
+    lon: lon,
+    listaCamada: listaCamada || null
+  }};
+  indiceSites[chave] = item;
+
+  // Permite buscar tambem apenas pelas tres letras finais do site.
+  // Ex.: MG-NSB, MGNSB ou NSB.
+  if(chave.length >= 3){{
+    indiceSites[chave.slice(-3)] = item;
+  }}
+}}
+
+function mostrarMensagemBusca(texto){{
+  var msg = document.getElementById('msg-busca-site');
+  msg.textContent = texto || '';
+  msg.classList.toggle('visivel', Boolean(texto));
+  if(buscaTimer) clearTimeout(buscaTimer);
+  if(texto){{
+    buscaTimer = setTimeout(function(){{
+      msg.classList.remove('visivel');
+    }}, 2600);
+  }}
+}}
+
+function garantirCamadaVisivel(item){{
+  if(item.listaCamada === 'conc') document.getElementById('chk-conc').checked = true;
+  if(item.listaCamada === 'impr') document.getElementById('chk-impr').checked = true;
+  if(item.listaCamada === 'aguard') document.getElementById('chk-aguard').checked = true;
+  if(item.listaCamada && !map.hasLayer(item.marker)) item.marker.addTo(map);
+}}
+
+function buscarSiteNoMapa(){{
+  var entrada = document.getElementById('busca-site').value;
+  var chave = normalizarBuscaSite(entrada);
+  if(!chave){{
+    mostrarMensagemBusca('');
+    return;
+  }}
+
+  var item = indiceSites[chave];
+  if(!item){{
+    mostrarMensagemBusca('Site não encontrado!');
+    return;
+  }}
+
+  mostrarMensagemBusca('');
+  garantirCamadaVisivel(item);
+  map.closePopup();
+  map.flyTo([item.lat, item.lon], Math.max(map.getZoom(), 13), {{
+    animate: true,
+    duration: .85
+  }});
+  setTimeout(function(){{
+    item.marker.openPopup();
+  }}, 900);
+}}
+
+// Icones
 function mkIcon(color, icon){{
   return L.AwesomeMarkers.icon({{icon:icon, markerColor:color, prefix:'glyphicon'}});
 }}
-var icPartida  = mkIcon('orange', 'star');
+var icPartida = L.divIcon({{
+  className: 'partida-animada',
+  html: '<div class="partida-pulse"><span class="partida-core"></span><span class="partida-orbit"></span></div>',
+  iconSize: [30,30],
+  iconAnchor: [15,15],
+  popupAnchor: [0,-18]
+}});
 var icPend     = mkIcon('blue',   'map-marker');
 var icConc     = mkIcon('green',  'ok-sign');
 var icImpr     = mkIcon('red',    'remove-sign');
 var icHotel    = mkIcon('orange', 'tower');
 
-// ── Hotéis ───────────────────────────────────────────────────────────────────
+// Hoteis
 var mkHoteis = [];
 HOTEIS.forEach(function(h){{
   var mk = L.marker([h.lat,h.lon],{{icon:icHotel}}).addTo(map);
@@ -1529,20 +1669,20 @@ HOTEIS.forEach(function(h){{
     (h.valor  ? "<b>Ultimo valor:</b> R$ "+h.valor+"<br>" : "")+
     "<div class='popup-status' style='background:#fef3e2;color:#b7600a;margin-top:6px;"+
     "padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;'>"+
-    "🏨 Hotel / Pousada</div>"+
+    "Hotel / Pousada</div>"+
     "</div>"
   );
   mkHoteis.push(mk);
 }});
 
-// ── Ponto de partida ─────────────────────────────────────────────────────────
+// Ponto de partida
 var mkPartida = L.marker([PARTIDA.lat,PARTIDA.lon],{{icon:icPartida}})
   .addTo(map)
-  .bindTooltip("📍 Partida: "+PARTIDA.cidade,{{sticky:true,className:'tip-site'}})
+  .bindTooltip("Partida: "+PARTIDA.cidade,{{sticky:true,className:'tip-site'}})
   .bindPopup("<div class='popup-box'><b>Ponto de partida</b><br>"+PARTIDA.cidade+"</div>");
 
-// ── Rota e polilinha ──────────────────────────────────────────────────────────
-var marcadores = [];   // só pendentes, na ordem da rota
+// Rota e polilinha
+var marcadores = [];   // so pendentes, na ordem da rota
 var polyline;
 
 function coordsRota(){{
@@ -1587,21 +1727,24 @@ ROTA.forEach(function(p, idx){{
   btn.innerHTML = '✓ Marcar como Concluída';
   btn.onclick = function(){{
     map.removeLayer(marker);
+    concCount += 1;
     // Adiciona marcador verde no lugar
     var mk2 = L.marker([p.lat,p.lon],{{icon:icConc}}).addTo(map);
     mk2.className = 'marcador-conc';   // para contagem
     mk2.bindTooltip("✓ "+p.id,{{sticky:true,className:'tip-conc'}});
     mk2.bindPopup("<div class='popup-box'><b>"+p.id+"</b><br>"+p.cidade+
       "<div class='popup-status ps-conc'>✓ Concluída</div></div>");
+    registrarSiteBusca(p.id, mk2, p.lat, p.lon, null);
     redesenharRota();
   }};
   pop.appendChild(btn);
   marker.bindPopup(pop);
 
   marcadores.push({{marker:marker, lat:p.lat, lon:p.lon}});
+  registrarSiteBusca(p.id, marker, p.lat, p.lon, null);
 }});
 
-// ── Fixos (concluídas / improdutivas do mês) ─────────────────────────────────
+// Fixos (concluidas / improdutivas do mes)
 var mkConc = [];
 var mkImpr = [];
 FIXOS.forEach(function(p){{
@@ -1624,16 +1767,17 @@ FIXOS.forEach(function(p){{
     statusHtml+
     "</div>"
   );
+  registrarSiteBusca(p.id, mk, p.lat, p.lon, p.tipo === 'concluida' ? 'conc' : 'impr');
   if(p.tipo === 'concluida') mkConc.push(mk);
   else mkImpr.push(mk);
 }});
 
-// ── Aguardando para deslocar ─────────────────────────────────────────────────
+// Aguardando para deslocar
 var icAguard = mkIcon('purple', 'time');
 var mkAguard = [];
 AGUARD.forEach(function(p){{
   var mk = L.marker([p.lat,p.lon],{{icon:icAguard}}).addTo(map);
-  mk.bindTooltip("⏳ "+p.id+"<br>"+p.cidade,{{sticky:true,className:'tip-site'}});
+  mk.bindTooltip("Aguardando: "+p.id+"<br>"+p.cidade,{{sticky:true,className:'tip-site'}});
   var freqStr = [p.tec4g,p.tec5g].filter(Boolean).join(' | ');
   mk.bindPopup(
     "<div class='popup-box'>"+
@@ -1644,13 +1788,14 @@ AGUARD.forEach(function(p){{
     (p.hotel && p.hotel !== '.' ? "<b>Hotel:</b> "+p.hotel+"<br>" : "")+
     "<div class='popup-status' style='background:#e8daef;color:#6c3483;margin-top:6px;"+
     "padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;'>"+
-    "⏳ Aguardando para deslocar</div>"+
+    "Aguardando para deslocar</div>"+
     "</div>"
   );
+  registrarSiteBusca(p.id, mk, p.lat, p.lon, 'aguard');
   mkAguard.push(mk);
 }});
 
-// ── Checkboxes de visibilidade ────────────────────────────────────────────────
+// Checkboxes de visibilidade
 function toggleCamada(lista, visivel){{
   lista.forEach(function(mk){{
     if(visivel) {{ if(!map.hasLayer(mk)) mk.addTo(map); }}
@@ -1671,7 +1816,16 @@ document.getElementById('chk-aguard').addEventListener('change', function(){{
   toggleCamada(mkAguard, this.checked);
 }});
 
-// ── Inicializar ───────────────────────────────────────────────────────────────
+document.getElementById('btn-busca-site').addEventListener('click', buscarSiteNoMapa);
+document.getElementById('busca-site').addEventListener('keydown', function(ev){{
+  if(ev.key === 'Enter') buscarSiteNoMapa();
+}});
+document.getElementById('busca-site').addEventListener('input', function(){{
+  this.value = this.value.toUpperCase();
+  mostrarMensagemBusca('');
+}});
+
+// Inicializar
 redesenharRota();
 
 var todosMarcadores = marcadores.map(function(m){{return m.marker;}});
@@ -2101,3 +2255,4 @@ if __name__ == "__main__":
 
         else:
             print("  ⚠️  Opção inválida. Digite 1 ou 2.")
+
