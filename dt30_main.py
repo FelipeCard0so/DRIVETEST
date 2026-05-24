@@ -1,5 +1,5 @@
 """
-DT 3.0 - Automação Drive Test
+DT 3.2.1 - Automação Drive Test
 Organiza atividades, otimiza rota, atualiza Google Sheets,
 gera relatórios e mapa em um único processo.
 VERSÃO MAPBOX: Rotas reais com trânsito para próxima atividade.
