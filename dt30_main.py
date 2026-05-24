@@ -136,39 +136,118 @@ def carregar_mapbox_token():
 # NORMALIZAÇÃO DE TECNOLOGIA (TEC)
 # ============================================================
 
-_MAPA_TEC = [
-    (r"^2G[|/]3G[|/]LTE[|/]NR$",  "2G|3G|4G|5G"),
-    (r"^3G[|/]LTE[|/]NR$",         "3G|4G|5G"),
-    (r"^2G[|/]3G[|/]LTE$",         "2G|3G|4G"),
-    (r"^2G[|/]3G[|/]NR$",          "2G|3G|5G"),
-    (r"^LTE[|/]NR$",               "4G|5G"),
-    (r"^3G[|/]LTE$",               "3G|4G"),
-    (r"^3G[|/]NR$",                "3G|5G"),
-    (r"^2G[|/]LTE$",               "2G|4G"),
-    (r"^LTE$",                     "4G"),
-    (r"^NR$",                      "5G"),
-]
+# Ordem canônica de saída
+_ORDEM_TEC = ["2G", "3G", "4G", "5G"]
 
-_TEC_PADRAO = {"2G", "3G", "4G", "5G",
-               "2G|3G", "2G|4G", "2G|5G",
-               "3G|4G", "3G|5G", "4G|5G",
-               "2G|3G|4G", "2G|3G|5G", "2G|4G|5G", "3G|4G|5G",
-               "2G|3G|4G|5G"}
-
+# Aliases → tecnologia canônica
+_ALIAS_TEC = {
+    "LTE":  "4G",
+    "4G":   "4G",
+    "NR":   "5G",
+    "5G":   "5G",
+    "3G":   "3G",
+    "UMTS": "3G",
+    "WCDMA":"3G",
+    "2G":   "2G",
+    "GSM":  "2G",
+    "EDGE": "2G",
+    # Combinações coladas comuns
+    "2GLTE": None,   # sinal para expandir → 2G + 4G
+    "LTENR": None,   # sinal para expandir → 4G + 5G
+}
 
 def normalizar_tec(valor):
+    """
+    Normaliza tecnologia para padrão canônico: 2G|3G|4G|5G.
+
+    Aceita qualquer combinação humana:
+        "LTE"         → "4G"
+        "NR"          → "5G"
+        "LTE|NR"      → "4G|5G"
+        "3G|LTE|NR"   → "3G|4G|5G"
+        "3G|2GLTE|NR" → "2G|3G|4G|5G"
+        "2GLTE"        → "2G|4G"
+        "3G|TE|NR"    → "3G|4G|5G"  (TE = LTE truncado)
+    """
     if not valor:
-        return valor
-    s = str(valor).strip().upper()
-    if not s or s in ("NAN", "NONE"):
         return ""
-    if s in _TEC_PADRAO:
+    s = str(valor).strip().upper()
+    if not s or s in ("NAN", "NONE", "-", ""):
+        return ""
+
+    # Já está no padrão canônico
+    if re.match(r'^(2G|3G|4G|5G)([|](2G|3G|4G|5G))*$', s):
         return s
-    s_norm = re.sub(r"\s*[/]\s*", "|", s)
-    for padrao, substituto in _MAPA_TEC:
-        if re.match(padrao, s_norm, re.IGNORECASE):
-            return substituto
-    return valor.strip()
+
+    # Separar em tokens por |, /, espaço
+    tokens_raw = re.split(r'[|/\s]+', s)
+
+    techs = set()
+    for token in tokens_raw:
+        token = token.strip()
+        if not token:
+            continue
+
+        # Tratar combinações coladas tipo "2GLTE", "LTENR"
+        # Expandir: "2GLTE" → 2G + 4G
+        expandido = re.sub(r'(2G|3G|4G|5G|LTE|NR|GSM|UMTS|WCDMA|EDGE)',
+                           r'\1|', token)
+        sub_tokens = [t for t in expandido.split('|') if t]
+
+        for st in sub_tokens:
+            st = st.strip()
+            if st in _ALIAS_TEC:
+                canonical = _ALIAS_TEC[st]
+                if canonical:
+                    techs.add(canonical)
+                elif st == "2GLTE":
+                    techs.add("2G"); techs.add("4G")
+                elif st == "LTENR":
+                    techs.add("4G"); techs.add("5G")
+            elif st in ("TE",):
+                # "TE" sozinho = fragmento de "LTE"
+                techs.add("4G")
+            # tokens desconhecidos são ignorados silenciosamente
+
+    if not techs:
+        return ""
+
+    # Ordenar na ordem canônica: 2G → 3G → 4G → 5G
+    resultado = "|".join(t for t in _ORDEM_TEC if t in techs)
+    return resultado
+
+
+def inferir_tec_de_freq(freq_4g_str, freq_5g_str):
+    """
+    Infere o campo TEC a partir das frequências quando TEC está vazio.
+
+    freq_4g_str: ex "2G: 850/900|3G: 850|4G: 700/1800/2600"
+    freq_5g_str: ex "5G: 3500"
+
+    Retorna: ex "2G|3G|4G|5G"
+    """
+    techs = set()
+
+    if freq_4g_str and freq_4g_str.strip():
+        f = freq_4g_str.upper()
+        if "2G:" in f:
+            techs.add("2G")
+        if "3G:" in f:
+            techs.add("3G")
+        if "4G:" in f:
+            techs.add("4G")
+        # Se não tem prefixo explícito mas tem números → 4G
+        if not techs and re.search(r'\d{3,4}', freq_4g_str):
+            techs.add("4G")
+
+    if freq_5g_str and freq_5g_str.strip():
+        if re.search(r'\d{3,4}', freq_5g_str):
+            techs.add("5G")
+
+    if not techs:
+        return ""
+
+    return "|".join(t for t in _ORDEM_TEC if t in techs)
 
 
 # ============================================================
@@ -199,11 +278,12 @@ def normalizar_frequencia(freq_raw):
 
     REGRAS ABSOLUTAS:
     - Nunca remover nenhum número, mesmo que apareça 2x (são testes diferentes)
-    - 3G:850/850 → dois testes 3G na mesma banda → preservar ambos
+    - 3G:850/850 → dois testes 3G → preservar ambos
+    - 3G 850/850 → mesmo caso, espaço em vez de : → preservar ambos
     - 2300/2300   → duas portadoras distintas → preservar ambos
 
     DOIS MODOS:
-    Modo 1 — Entrada com blocos explícitos: "4G:700/1800|5G:3500"
+    Modo 1 — Entrada com blocos explícitos (4G:, 3G:, 2G:, 5G: ou 3G espaço)
     Modo 2 — Entrada sem blocos: "NR3500|L2600/L1800/700"
 
     Retorna: (freq_ate_4g_str, freq_5g_str)
@@ -213,7 +293,10 @@ def normalizar_frequencia(freq_raw):
 
     freq = re.sub(r'[\r\n"]+', ' ', freq_raw.strip()).strip()
 
-    if re.search(r'\b[2-5]G\s*:', freq, re.IGNORECASE):
+    # Detecta Modo 1: tem prefixo de banda explícito (com : ou seguido de espaço+número)
+    # Ex: "4G:", "3G:", "2G:", "5G:", "3G 850", "4G 700"
+    tem_bloco = bool(re.search(r'\b[2-5]G\s*[:\s]\s*\d', freq, re.IGNORECASE))
+    if tem_bloco:
         return _normalizar_com_blocos(freq)
     else:
         return _normalizar_sem_blocos(freq)
@@ -233,25 +316,41 @@ def _limpar_numeros_do_bloco(bloco_str):
 def _normalizar_com_blocos(freq):
     """
     Modo 1: entrada já tem prefixos explícitos (4G:, 3G:, 2G:, 5G:).
+    Também trata "3G 850/850" (espaço em vez de :) e blocos embutidos sem |.
     Preserva TODOS os números dentro de cada bloco, inclusive duplicados.
-    Exemplos reais:
+
+    Casos reais:
         "3G:850/850|4G:700/2100/2600|5G:3500"
+        "3G 850/850|L700/L1800"                     ← espaço em vez de :
+        "2G:850/900/1800/3G 850/850|4G:700/..."     ← 3G embutido no bloco 2G
         "4G:700/1800/2300/2300/2600|5G:3500"
         "4G: 2600/2100/L2300/O2300/1800/700|5G: 3500"
         "2G: 900 4G:700/2600"
     """
     nums_2g, nums_3g, nums_4g, nums_5g = [], [], [], []
 
-    # Garantir | entre blocos: "2G: 900 4G:700" → "2G: 900|4G:700"
-    freq_norm = re.sub(r'\s+([2-5]G\s*:)', r'|\1', freq)
+    # ── Passo 1: normalizar separadores de bloco ─────────────────────────
+    # Converter "3G " (espaço) para "3G:" para uniformizar
+    # "3G 850/850" → "3G:850/850"
+    freq_norm = re.sub(r'\b([2-5]G)\s+(?=\d)', r'\1:', freq, flags=re.IGNORECASE)
 
+    # Garantir | antes de cada início de bloco (quando não há | explícito)
+    # "2G:850/900/1800/3G:850/850" → "2G:850/900/1800|3G:850/850"
+    # "2G: 900 4G:700/2600"        → "2G: 900|4G:700/2600"
+    freq_norm = re.sub(r'(?<=[0-9])\s*([2-5]G\s*:)', r'|\1', freq_norm, flags=re.IGNORECASE)
+    freq_norm = re.sub(r'([/|])\s*([2-5]G\s*:)', r'|\2', freq_norm, flags=re.IGNORECASE)
+
+    # ── Passo 2: separar em segmentos por | ──────────────────────────────
     for seg in re.split(r'[|;]', freq_norm):
         seg = seg.strip()
         if not seg:
             continue
+
         m_banda = re.match(r'^([2-5]G)\s*:', seg, re.IGNORECASE)
         if not m_banda:
+            # Segmento sem prefixo de banda — ignorar (pode ser separador solto)
             continue
+
         banda  = m_banda.group(1).upper()
         resto  = seg[m_banda.end():]
         numeros = _limpar_numeros_do_bloco(resto)
@@ -265,13 +364,61 @@ def _normalizar_com_blocos(freq):
         elif banda == "5G":
             nums_5g.extend(numeros)
 
+    # ── Segmentos sem prefixo de banda (ex: "L700/L1800" após 3G bloco) ─
+    # Tratar pelo Modo 2 os números restantes
+    # Para isso, pegar segmentos que não tinham prefixo de banda
+    for seg in re.split(r'[|;]', freq_norm):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if re.match(r'^[2-5]G\s*:', seg, re.IGNORECASE):
+            continue  # já processado acima
+        # Segmento sem prefixo: classificar via Modo 2
+        extra_4g, extra_5g = _normalizar_sem_blocos(seg)
+        if extra_4g:
+            # extrair só os números do resultado e adicionar ao 4G
+            for m in re.finditer(r'4G:\s*([\d/RS]+)', extra_4g):
+                for num_str in m.group(1).split('/'):
+                    num_str = num_str.strip()
+                    if num_str.startswith('RS'):
+                        try:
+                            nums_4g.append(f"RS{int(num_str[2:])}")
+                        except ValueError:
+                            pass
+                    else:
+                        try:
+                            nums_4g.append(int(num_str))
+                        except ValueError:
+                            pass
+        if extra_5g:
+            for m in re.finditer(r'5G:\s*([\d/]+)', extra_5g):
+                for num_str in m.group(1).split('/'):
+                    try:
+                        nums_5g.append(int(num_str.strip()))
+                    except ValueError:
+                        pass
+
+    # ── Ordenar 4G por ORDEM_BANDA_4G (RS fica após seu número base) ────
+    def _chave_4g_bloco(x):
+        if isinstance(x, str) and x.startswith("RS"):
+            try:
+                num = int(x[2:])
+                idx = ORDEM_BANDA_4G.index(num) if num in ORDEM_BANDA_4G else 99
+                return (1, idx, num)
+            except ValueError:
+                return (2, 99, 0)
+        idx = ORDEM_BANDA_4G.index(x) if isinstance(x, int) and x in ORDEM_BANDA_4G else 99
+        return (0, idx, x if isinstance(x, int) else 0)
+
+    nums_4g_ordenado = sorted(nums_4g, key=_chave_4g_bloco)
+
     blocos = []
     if nums_2g:
         blocos.append("2G: " + "/".join(str(n) for n in nums_2g))
     if nums_3g:
         blocos.append("3G: " + "/".join(str(n) for n in nums_3g))
-    if nums_4g:
-        blocos.append("4G: " + "/".join(str(n) for n in nums_4g))
+    if nums_4g_ordenado:
+        blocos.append("4G: " + "/".join(str(n) for n in nums_4g_ordenado))
 
     freq_4g = "|".join(blocos) if blocos else ""
     freq_5g = ("5G: " + "/".join(str(n) for n in nums_5g)) if nums_5g else ""
@@ -997,6 +1144,12 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
             freq_234, freq_5g = "", ""
         else:
             freq_234, freq_5g = normalizar_frequencia(str(freq_raw).strip())
+
+        # Se TEC vazio, inferir pelas frequências
+        if not tec and (freq_234 or freq_5g):
+            tec = inferir_tec_de_freq(freq_234, freq_5g)
+            if tec:
+                print(f"{prefixo} ℹ️  {site}: TEC inferida das frequências → {tec}")
 
         def _s(campo):
             if campo not in col: return ""
@@ -3060,10 +3213,25 @@ def main():
         for arq in arquivos_novas:
             try:
                 destino = processados / arq.name
+                # Se já existe na pasta processados, renomear com timestamp
+                if destino.exists():
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    nome_sem_ext = arq.stem
+                    destino = processados / f"{nome_sem_ext}_{ts}{arq.suffix}"
                 arq.rename(destino)
-                print(f"   Movido: processados/{arq.name}")
+                print(f"   Movido: processados/{destino.name}")
             except Exception as e:
                 print(f"   ⚠️  Nao foi possivel mover {arq.name}: {e}")
+                # Fallback: tentar copiar e apagar
+                try:
+                    import shutil
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    destino = processados / f"{arq.stem}_{ts}{arq.suffix}"
+                    shutil.copy2(str(arq), str(destino))
+                    arq.unlink()
+                    print(f"   Movido (fallback): processados/{destino.name}")
+                except Exception as e2:
+                    print(f"   ❌ Falha ao mover {arq.name}: {e2}")
 
     print("\n" + "=" * 60)
     print("  ✅ DT 3.0 concluído com sucesso!")
