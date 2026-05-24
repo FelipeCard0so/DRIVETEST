@@ -176,6 +176,7 @@ def normalizar_tec(valor):
 # ============================================================
 
 def _ordenar_nums_4g(nums_str):
+    """Ordena números 4G pela sequência definida em ORDEM_BANDA_4G."""
     def chave(x):
         num = int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 9999
         return ORDEM_BANDA_4G.index(num) if num in ORDEM_BANDA_4G else 99
@@ -183,6 +184,7 @@ def _ordenar_nums_4g(nums_str):
 
 
 def _reordenar_bloco_4g(bloco):
+    """Reordena um bloco '4G: 2600/1800/700' mantendo o prefixo."""
     if ':' not in bloco:
         return bloco
     tec, nums_raw = bloco.split(':', 1)
@@ -192,44 +194,170 @@ def _reordenar_bloco_4g(bloco):
 
 
 def normalizar_frequencia(freq_raw):
+    """
+    Normaliza frequências preservando TUDO — inclusive portadoras duplicadas.
+
+    REGRAS ABSOLUTAS:
+    - Nunca remover nenhum número, mesmo que apareça 2x (são testes diferentes)
+    - 3G:850/850 → dois testes 3G na mesma banda → preservar ambos
+    - 2300/2300   → duas portadoras distintas → preservar ambos
+
+    DOIS MODOS:
+    Modo 1 — Entrada com blocos explícitos: "4G:700/1800|5G:3500"
+    Modo 2 — Entrada sem blocos: "NR3500|L2600/L1800/700"
+
+    Retorna: (freq_ate_4g_str, freq_5g_str)
+    """
     if not isinstance(freq_raw, str) or not freq_raw.strip():
         return "", ""
 
-    freq = freq_raw.strip()
+    freq = re.sub(r'[\r\n"]+', ' ', freq_raw.strip()).strip()
 
-    if re.search(r'\b(?:NR?|L)\d{3,4}', freq, re.IGNORECASE) and 'G:' not in freq:
-        freq_5g = ""
-        nums_4g = []
+    if re.search(r'\b[2-5]G\s*:', freq, re.IGNORECASE):
+        return _normalizar_com_blocos(freq)
+    else:
+        return _normalizar_sem_blocos(freq)
 
-        for m in re.finditer(r'NR?(\d{3,4})', freq, re.IGNORECASE):
-            freq_5g = f"5G: {m.group(1)}"
 
-        for m in re.finditer(r'L(\d{3,4})', freq, re.IGNORECASE):
-            nums_4g.append(m.group(1))
+def _limpar_numeros_do_bloco(bloco_str):
+    """Extrai números de um bloco de banda. Preserva duplicatas."""
+    numeros = []
+    for m in re.finditer(r'(\d{3,5})', bloco_str):
+        try:
+            numeros.append(int(m.group(1)))
+        except ValueError:
+            pass
+    return numeros
 
-        if nums_4g:
-            freq_4g = "4G: " + "/".join(_ordenar_nums_4g(nums_4g))
-        else:
-            freq_4g = ""
 
-        return freq_4g, freq_5g
+def _normalizar_com_blocos(freq):
+    """
+    Modo 1: entrada já tem prefixos explícitos (4G:, 3G:, 2G:, 5G:).
+    Preserva TODOS os números dentro de cada bloco, inclusive duplicados.
+    Exemplos reais:
+        "3G:850/850|4G:700/2100/2600|5G:3500"
+        "4G:700/1800/2300/2300/2600|5G:3500"
+        "4G: 2600/2100/L2300/O2300/1800/700|5G: 3500"
+        "2G: 900 4G:700/2600"
+    """
+    nums_2g, nums_3g, nums_4g, nums_5g = [], [], [], []
 
-    partes = freq.split("|")
-    ate_4g, freq_5g = [], ""
+    # Garantir | entre blocos: "2G: 900 4G:700" → "2G: 900|4G:700"
+    freq_norm = re.sub(r'\s+([2-5]G\s*:)', r'|\1', freq)
 
-    for p in partes:
-        p = p.strip()
-        if not p:
+    for seg in re.split(r'[|;]', freq_norm):
+        seg = seg.strip()
+        if not seg:
             continue
-        if p.upper().startswith("5G"):
-            freq_5g = p
-        elif re.match(r'^4G:', p, re.IGNORECASE):
-            ate_4g.append(_reordenar_bloco_4g(p))
+        m_banda = re.match(r'^([2-5]G)\s*:', seg, re.IGNORECASE)
+        if not m_banda:
+            continue
+        banda  = m_banda.group(1).upper()
+        resto  = seg[m_banda.end():]
+        numeros = _limpar_numeros_do_bloco(resto)
+
+        if banda == "2G":
+            nums_2g.extend(numeros)
+        elif banda == "3G":
+            nums_3g.extend(numeros)
+        elif banda == "4G":
+            nums_4g.extend(numeros)
+        elif banda == "5G":
+            nums_5g.extend(numeros)
+
+    blocos = []
+    if nums_2g:
+        blocos.append("2G: " + "/".join(str(n) for n in nums_2g))
+    if nums_3g:
+        blocos.append("3G: " + "/".join(str(n) for n in nums_3g))
+    if nums_4g:
+        blocos.append("4G: " + "/".join(str(n) for n in nums_4g))
+
+    freq_4g = "|".join(blocos) if blocos else ""
+    freq_5g = ("5G: " + "/".join(str(n) for n in nums_5g)) if nums_5g else ""
+    return freq_4g, freq_5g
+
+
+def _normalizar_sem_blocos(freq):
+    """
+    Modo 2: entrada sem blocos explícitos (novas atividades do Excel).
+    Ex: "NR3500|L2600/L1800/700", "2600/RS2600", "700/1800/2600/3500"
+    Classifica por prefixo e banda. Preserva RS como portadora distinta.
+    Deduplica apenas L2600 == 2600 (mesmo token), RS2600 != 2600.
+    """
+    tokens = []
+    for m in re.finditer(r'((?:NR|RS|[2-5]G|L)?)(\d{3,5})', freq, re.IGNORECASE):
+        prefixo = m.group(1).upper() if m.group(1) else ""
+        try:
+            numero = int(m.group(2))
+        except ValueError:
+            continue
+        tokens.append((prefixo, numero))
+
+    if not tokens:
+        return "", ""
+
+    vistos = set()
+    tokens_unicos = []
+    for prefixo, numero in tokens:
+        chave = ("L" if prefixo in {"L", ""} else prefixo, numero)
+        if chave not in vistos:
+            vistos.add(chave)
+            tokens_unicos.append((prefixo, numero))
+
+    nums_2g, nums_3g, nums_4g, nums_5g = [], [], [], []
+
+    for prefixo, numero in tokens_unicos:
+        if prefixo in {"NR", "5G"}:
+            nums_5g.append(numero)
+        elif prefixo == "3G":
+            nums_3g.append(numero)
+        elif prefixo == "2G":
+            nums_2g.append(numero)
+        elif prefixo == "RS":
+            nums_4g.append(f"RS{numero}")
+        elif numero == 700:
+            nums_4g.append(numero)
+        elif numero in {850, 900}:
+            nums_3g.append(numero) if "3G" in freq.upper() else nums_4g.append(numero)
+        elif numero == 1800:
+            nums_2g.append(numero) if "2G" in freq.upper() else nums_4g.append(numero)
+        elif numero == 2100:
+            nums_3g.append(numero) if "3G" in freq.upper() else nums_4g.append(numero)
+        elif numero in {2300, 2600}:
+            nums_4g.append(numero)
+        elif numero >= 3500:
+            nums_5g.append(numero)
         else:
-            ate_4g.append(p)
+            nums_4g.append(numero)
 
-    return "|".join(ate_4g), freq_5g
+    def _chave_4g(x):
+        if isinstance(x, str) and x.startswith("RS"):
+            try:
+                num = int(x[2:])
+                idx = ORDEM_BANDA_4G.index(num) if num in ORDEM_BANDA_4G else 99
+                return (1, idx, num)
+            except ValueError:
+                return (2, 99, 0)
+        idx = ORDEM_BANDA_4G.index(x) if isinstance(x, int) and x in ORDEM_BANDA_4G else 99
+        return (0, idx, x if isinstance(x, int) else 0)
 
+    nums_2g = sorted(set(nums_2g))
+    nums_3g = sorted(set(nums_3g))
+    nums_4g = sorted(nums_4g, key=_chave_4g)
+    nums_5g = sorted(set(nums_5g))
+
+    blocos = []
+    if nums_2g:
+        blocos.append("2G: " + "/".join(str(n) for n in nums_2g))
+    if nums_3g:
+        blocos.append("3G: " + "/".join(str(n) for n in nums_3g))
+    if nums_4g:
+        blocos.append("4G: " + "/".join(str(n) for n in nums_4g))
+
+    freq_4g = "|".join(blocos) if blocos else ""
+    freq_5g = ("5G: " + "/".join(str(n) for n in nums_5g)) if nums_5g else ""
+    return freq_4g, freq_5g
 
 # ============================================================
 # DISTÂNCIA / OTIMIZAÇÃO DE ROTA
@@ -1292,10 +1420,45 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None,
     j_part   = json.dumps(partida,       ensure_ascii=False)
     j_hist   = json.dumps(historico_meses or {}, ensure_ascii=False)
 
+    # ── Token Mapbox (antes do cálculo de rota e da geração do HTML) ──
+    token = mapbox_token or ""
+
+    # ── Calcular ROTA REAL no Python (1 chamada Directions API) ─────
+    rota_real_data = {"distancia": 0, "duracao": 0, "geometry": None}
+
+    if pontos_rota and token:
+        try:
+            prox = pontos_rota[0]
+            url_directions = (
+                f"https://api.mapbox.com/directions/v5/mapbox/driving-traffic/"
+                f"{lon0},{lat0};{prox['lon']},{prox['lat']}"
+                f"?access_token={token}&geometries=geojson&overview=full"
+            )
+            resp = requests.get(url_directions, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("routes"):
+                    route = data["routes"][0]
+                    rota_real_data = {
+                        "distancia": round(route["distance"] / 1000, 1),
+                        "duracao": round(route["duration"] / 60),
+                        "geometry": route["geometry"]
+                    }
+                    print(f"   ✅ Rota real calculada: {rota_real_data['distancia']} km em {rota_real_data['duracao']} min")
+            else:
+                print(f"   ⚠️  Directions API retornou {resp.status_code} — usando linha reta")
+        except Exception as e:
+            print(f"   ⚠️  Erro ao calcular rota: {e} — usando linha reta")
+    elif pontos_rota:
+        print("   ⚠️  Token Mapbox ausente — rota será linha reta")
+    else:
+        print("   ℹ️  Sem atividades pendentes — rota vazia")
+
+    j_rota_real = json.dumps(rota_real_data, ensure_ascii=False)
+
     # ── Token Mapbox: salvo em arquivo JS separado (fora do HTML) ──
     # O HTML carrega mapbox_config.js que NÃO vai para o GitHub.
     # Isso resolve o erro 409 "Secret detected in content" do GitHub.
-    token = mapbox_token or ""
     config_js_path = BASE_DIR / "mapbox_config.js"
     try:
         with open(config_js_path, "w", encoding="utf-8") as f_cfg:
@@ -1643,6 +1806,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 // ══════════════════════════════════════════════════════════════
 var PARTIDA       = {j_part};
 var ROTA          = {j_rota};
+var ROTA_REAL     = {j_rota_real};  // ← Pré-calculada no Python (1 chamada)
 var FIXOS         = {j_fixos};
 var AGUARD        = {j_aguard};
 var HOTEIS        = {j_hoteis};
@@ -1846,101 +2010,77 @@ function toggleTraffic(ativo) {{
 }}
 
 // ══════════════════════════════════════════════════════════════
-// DESENHAR ROTA REAL (Mapbox Directions API → próxima atividade)
+// DESENHAR ROTA REAL (PRÉ-CALCULADA no Python)
 // ══════════════════════════════════════════════════════════════
+// ✅ ZERO chamadas de API do navegador — rota já vem do Python
+// Economia máxima de tokens Mapbox
+// ══════════════════════════════════════════════════════════════
+
 function atualizarEtaBox(html) {{
   document.getElementById('eta-box').innerHTML = html;
 }}
 
-async function desenharRotaReal(latOrig, lonOrig, proxPonto) {{
-  if (quotaEsgotada()) {{
+function desenharRotaReal(latOrig, lonOrig, proxPonto) {{
+  // ✅ Rota já foi calculada no Python (1 chamada ao atualizar mapa)
+  // O navegador apenas DESENHA a rota — nenhuma API call
+  
+  if (!ROTA_REAL || !ROTA_REAL.geometry) {{
+    // Fallback: linha reta se rota não foi calculada
     atualizarEtaBox(
       '<div class="eta-site">' + proxPonto.id + ' — ' + proxPonto.cidade + '</div>' +
-      '<div class="eta-erro">❌ Quota Mapbox esgotada — rota sem cálculo de trajeto.</div>'
+      '<div class="eta-erro">⚠️ Rota não calculada — traçado direto exibido.</div>'
     );
     desenharLinhaGuia(latOrig, lonOrig, proxPonto.lat, proxPonto.lon, 'rota-prox', '#2A52BE', true, 4);
     return;
   }}
 
-  atualizarEtaBox('<div class="eta-loading">⏳ Calculando rota para ' + proxPonto.id + '...</div>');
+  var distKm = ROTA_REAL.distancia;
+  var durMin = ROTA_REAL.duracao;
+  var durStr = durMin >= 60
+    ? Math.floor(durMin/60) + 'h ' + (durMin % 60) + 'min'
+    : durMin + ' min';
 
-  try {{
-    var url = 'https://api.mapbox.com/directions/v5/mapbox/driving-traffic/' +
-      lonOrig + ',' + latOrig + ';' + proxPonto.lon + ',' + proxPonto.lat +
-      '?access_token=' + MAPBOX_TOKEN +
-      '&geometries=geojson&overview=full&steps=false&language=pt-BR';
+  // ETA box: mostra apenas duração (fixa, não muda)
+  // Removida a hora de chegada (que muda ao longo do dia)
+  atualizarEtaBox(
+    '<div class="eta-site">📍 ' + proxPonto.id + ' — ' + proxPonto.cidade + '</div>' +
+    '<div class="eta-linha">🛣️ <b>' + distKm + ' km</b> de distância</div>' +
+    '<div class="eta-linha">⏱️ <b>' + durStr + '</b> de deslocamento</div>'
+  );
 
-    var resp = await fetch(url);
-    var data = await resp.json();
+  // Desenhar rota no mapa (geometry pré-calculada)
+  if (map.getLayer('layer-rota-real')) map.removeLayer('layer-rota-real');
+  if (map.getLayer('layer-rota-real-borda')) map.removeLayer('layer-rota-real-borda');
+  if (map.getSource('source-rota-real')) map.removeSource('source-rota-real');
 
-    if (!data.routes || !data.routes.length) {{
-      throw new Error('Nenhuma rota retornada pela API');
+  map.addSource('source-rota-real', {{
+    type: 'geojson',
+    data: {{ type: 'Feature', geometry: ROTA_REAL.geometry }}
+  }});
+
+  // Borda/sombra branca
+  map.addLayer({{
+    id: 'layer-rota-real-borda',
+    type: 'line',
+    source: 'source-rota-real',
+    paint: {{
+      'line-color': '#fff',
+      'line-width': 8,
+      'line-opacity': 0.5
     }}
+  }});
 
-    var route = data.routes[0];
-    var distKm = (route.distance / 1000).toFixed(1);
-    var durMin = Math.round(route.duration / 60);
-    var durStr = durMin >= 60
-      ? Math.floor(durMin/60) + 'h ' + (durMin % 60) + 'min'
-      : durMin + ' min';
-
-    // Hora de chegada estimada
-    var chegada = new Date(Date.now() + route.duration * 1000);
-    var chegadaStr = chegada.toLocaleTimeString('pt-BR', {{hour:'2-digit', minute:'2-digit'}});
-
-    // Incrementar quota
-    var usoAtual = incrementarUso();
-
-    // ETA box atualizado
-    atualizarEtaBox(
-      '<div class="eta-site">📍 ' + proxPonto.id + ' — ' + proxPonto.cidade + '</div>' +
-      '<div class="eta-linha">🛣️ <b>' + distKm + ' km</b> de distância</div>' +
-      '<div class="eta-linha">⏱️ <b>' + durStr + '</b> (com trânsito atual)</div>' +
-      '<div class="eta-linha">🕐 Chegada ~<b>' + chegadaStr + '</b></div>'
-    );
-
-    // Desenhar rota real no mapa
-    if (map.getLayer('layer-rota-real')) map.removeLayer('layer-rota-real');
-    if (map.getSource('source-rota-real')) map.removeSource('source-rota-real');
-
-    map.addSource('source-rota-real', {{
-      type: 'geojson',
-      data: {{ type: 'Feature', geometry: route.geometry }}
-    }});
-
-    // Borda/sombra da rota
-    map.addLayer({{
-      id: 'layer-rota-real-borda',
-      type: 'line',
-      source: 'source-rota-real',
-      paint: {{
-        'line-color': '#fff',
-        'line-width': 8,
-        'line-opacity': 0.5
-      }}
-    }});
-
-    // Linha principal (azul sólido, grossa)
-    map.addLayer({{
-      id: 'layer-rota-real',
-      type: 'line',
-      source: 'source-rota-real',
-      paint: {{
-        'line-color': '#1a237e',
-        'line-width': 5,
-        'line-opacity': 0.92
-      }}
-    }});
-
-  }} catch(err) {{
-    console.error('Directions API erro:', err);
-    atualizarEtaBox(
-      '<div class="eta-site">' + proxPonto.id + ' — ' + proxPonto.cidade + '</div>' +
-      '<div class="eta-erro">⚠️ Rota real não disponível — traçado direto exibido.</div>'
-    );
-    // Fallback: linha reta
-    desenharLinhaGuia(latOrig, lonOrig, proxPonto.lat, proxPonto.lon, 'rota-prox', '#2A52BE', false, 4);
-  }}
+  // Linha principal azul escuro
+  map.addLayer({{
+    id: 'layer-rota-real',
+    type: 'line',
+    source: 'source-rota-real',
+    paint: {{
+      'line-color': '#1a237e',
+      'line-width': 5,
+      'line-opacity': 0.92
+    }}
+  }});
 }}
 
 // ══════════════════════════════════════════════════════════════
