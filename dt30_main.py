@@ -1767,47 +1767,6 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
         pendentes    = pontos_rota_lista
         aguardando   = pontos_aguard_lista
 
-        # Calcular km totais percorridos entre pontos concluídos + improdutivos
-        todos_visitados = concluidas + improdutivas
-        km_total = 0.0
-        if len(todos_visitados) > 1:
-            for i in range(1, len(todos_visitados)):
-                la1 = todos_visitados[i-1].get("lat", 0)
-                lo1 = todos_visitados[i-1].get("lon", 0)
-                la2 = todos_visitados[i].get("lat", 0)
-                lo2 = todos_visitados[i].get("lon", 0)
-                if la1 and lo1 and la2 and lo2:
-                    import math as _math
-                    dLat = _math.radians(la2 - la1)
-                    dLon = _math.radians(lo2 - lo1)
-                    a = (_math.sin(dLat/2)**2 +
-                         _math.cos(_math.radians(la1)) * _math.cos(_math.radians(la2)) *
-                         _math.sin(dLon/2)**2)
-                    km_total += 6371 * 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1-a))
-
-        # Top deslocamentos (entre pares consecutivos visitados)
-        deslocamentos = []
-        for i in range(1, len(todos_visitados)):
-            la1 = todos_visitados[i-1].get("lat", 0)
-            lo1 = todos_visitados[i-1].get("lon", 0)
-            la2 = todos_visitados[i].get("lat", 0)
-            lo2 = todos_visitados[i].get("lon", 0)
-            if la1 and lo1 and la2 and lo2:
-                import math as _math
-                dLat = _math.radians(la2 - la1)
-                dLon = _math.radians(lo2 - lo1)
-                a = (_math.sin(dLat/2)**2 +
-                     _math.cos(_math.radians(la1)) * _math.cos(_math.radians(la2)) *
-                     _math.sin(dLon/2)**2)
-                km = 6371 * 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1-a))
-                deslocamentos.append({
-                    "de":  todos_visitados[i-1].get("id", ""),
-                    "para": todos_visitados[i].get("id", ""),
-                    "km":  round(km, 1)
-                })
-
-        deslocamentos_ord = sorted(deslocamentos, key=lambda x: x["km"], reverse=True)
-
         return {
             "concluidas":   len(concluidas),
             "improdutivas": len(improdutivas),
@@ -1815,10 +1774,165 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
             "pendentes":    len(pendentes),
             "aguardando":   len(aguardando),
             "total":        len(concluidas) + len(improdutivas) + len(canceladas),
-            "km_total":     round(km_total, 1),
-            "top_maiores":  deslocamentos_ord[:5],
-            "top_menores":  sorted(deslocamentos, key=lambda x: x["km"])[:5] if deslocamentos else [],
+            "km_total":     0.0,   # será preenchido pelo hodômetro real
+            "top_maiores":  [],    # será preenchido pela planilha de controle
+            "top_menores":  [],    # será preenchido pela planilha de controle
         }
+
+    def _ler_deslocamentos_controle(client_km):
+        """
+        Lê os deslocamentos diários da planilha Controle Diário de Atividades.
+        Para cada linha com km > 0:
+          - Cidade de chegada  = coluna LOCAL da linha atual
+          - Cidade de saída    = coluna LOCAL da linha anterior com cidade preenchida
+            (se for o primeiro dia do mês, busca a última cidade do mês anterior)
+        Retorna lista de dicts:
+          {"de": "Cidade A", "para": "Cidade B", "km": 620.0}
+        ordenada pela data (ordem das linhas).
+        """
+        meses_pt_ctrl = [
+            "JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
+            "JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO",
+        ]
+        now = datetime.now()
+        nome_aba_atual  = f"{meses_pt_ctrl[now.month - 1]} - {str(now.year)[-2:]}"
+        # Aba do mês anterior
+        mes_ant_idx = now.month - 2  # 0-based
+        ano_ant     = now.year if now.month > 1 else now.year - 1
+        mes_ant_idx = mes_ant_idx % 12
+        nome_aba_ant = f"{meses_pt_ctrl[mes_ant_idx]} - {str(ano_ant)[-2:]}"
+
+        try:
+            sh = client_km.open_by_key(CONTROLE_KM_ID)
+        except Exception as e:
+            print(f"   ⚠️  Deslocamentos: não foi possível abrir planilha — {e}")
+            return []
+
+        def _buscar_aba(nome):
+            for ws in sh.worksheets():
+                if remove_acentos(ws.title.strip().upper()) == remove_acentos(nome.upper()):
+                    return ws
+            return None
+
+        def _detectar_colunas(dados):
+            """Retorna (cabecalho_idx, col_dia, col_desl, col_local) ou None."""
+            for i, linha in enumerate(dados):
+                ln = [remove_acentos(str(c).strip().upper()) for c in linha]
+                if "DIA" in ln and "DESLOCAMENTO" in ln:
+                    col_dia    = next((j for j, c in enumerate(ln) if c == "DIA"), None)
+                    col_desl   = next((j for j, c in enumerate(ln) if "DESLOCAMENTO" in c), None)
+                    # CIDADES é a última coluna com cabeçalho — prioridade: "CIDADE" sozinho
+                    # ou "CIDADES", nunca "HORA TRABALHADA"
+                    col_local  = None
+                    for j, c in enumerate(ln):
+                        if ("CIDADE" in c or c == "LOCAL") and "HORA" not in c and "TRAB" not in c:
+                            col_local = j  # pega a última ocorrência (mais à direita)
+                    col_inicio  = next((j for j, c in enumerate(ln)
+                                        if "INICIO" in c or "INICIO" in c), None)
+                    col_termino = next((j for j, c in enumerate(ln)
+                                        if "TERMINO" in c or "TERMINO" in c or "TERM" in c), None)
+                    return i, col_dia, col_desl, col_local, col_inicio, col_termino
+            return None, None, None, None, None, None
+
+        def _linhas_validas(dados, cab, col_dia, col_desl, col_local, col_inicio, col_termino):
+            """
+            Retorna lista de dicts com todos os dias da aba:
+              {"dia_num": str, "cidade": str, "km": float, "inicio": str, "termino": str}
+            km=0 para dias sem deslocamento (útil para rastrear cidade de saída).
+            """
+            linhas = []
+            for linha in dados[cab + 1:]:
+                dia_val = str(linha[col_dia]).strip() if col_dia is not None and col_dia < len(linha) else ""
+                if not dia_val or not dia_val.isdigit():
+                    continue
+
+                cidade = ""
+                if col_local is not None and col_local < len(linha):
+                    cidade = str(linha[col_local]).strip()
+
+                inicio = ""
+                if col_inicio is not None and col_inicio < len(linha):
+                    inicio = str(linha[col_inicio]).strip()
+
+                termino = ""
+                if col_termino is not None and col_termino < len(linha):
+                    termino = str(linha[col_termino]).strip()
+
+                km = 0.0
+                if col_desl is not None and col_desl < len(linha):
+                    cel = str(linha[col_desl]).strip()
+                    cel_num = re.sub(r'[^\d.,]', '', cel).replace('.', '').replace(',', '.')
+                    try:
+                        km = float(cel_num)
+                    except ValueError:
+                        km = 0.0
+
+                linhas.append({
+                    "dia_num": dia_val,
+                    "cidade":  cidade,
+                    "km":      km,
+                    "inicio":  inicio,
+                    "termino": termino,
+                })
+            return linhas
+
+        # ── Ler aba atual ────────────────────────────────────────────────
+        ws_atual = _buscar_aba(nome_aba_atual)
+        if ws_atual is None:
+            return []
+        try:
+            dados_atual = ws_atual.get_all_values()
+        except Exception:
+            return []
+
+        cab, col_dia, col_desl, col_local, col_inicio, col_termino = _detectar_colunas(dados_atual)
+        if cab is None:
+            return []
+
+        linhas_atual = _linhas_validas(dados_atual, cab, col_dia, col_desl, col_local, col_inicio, col_termino)
+
+        # ── Última cidade do mês anterior (fallback para 1º dia) ─────────
+        ultima_cidade_ant = ""
+        ws_ant = _buscar_aba(nome_aba_ant)
+        if ws_ant:
+            try:
+                dados_ant = ws_ant.get_all_values()
+                cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a, col_ter_a = _detectar_colunas(dados_ant)
+                if cab_a is not None:
+                    linhas_ant = _linhas_validas(dados_ant, cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a, col_ter_a)
+                    # Última cidade preenchida do mês anterior
+                    for l in reversed(linhas_ant):
+                        if l["cidade"]:
+                            ultima_cidade_ant = l["cidade"]
+                            break
+            except Exception:
+                pass
+
+        # ── Montar pares saída → chegada ─────────────────────────────────
+        # Para cada linha com km > 0, a cidade de saída é a última cidade
+        # preenchida ANTES dessa linha (podendo ser do mês anterior).
+        deslocamentos = []
+        ultima_cidade = ultima_cidade_ant  # começa com fallback do mês anterior
+
+        for linha in linhas_atual:
+            cidade_chegada = linha["cidade"]
+            km = linha["km"]
+
+            if km > 0 and cidade_chegada:
+                cidade_saida = ultima_cidade if ultima_cidade else "—"
+                deslocamentos.append({
+                    "de":      cidade_saida,
+                    "para":    cidade_chegada,
+                    "km":      round(km, 1),
+                    "inicio":  linha.get("inicio", ""),
+                    "termino": linha.get("termino", ""),
+                })
+
+            # Atualizar última cidade conhecida
+            if cidade_chegada:
+                ultima_cidade = cidade_chegada
+
+        return deslocamentos
 
     # Stats mês atual
     stats_atual = _stats_de_pontos(pontos_fixos, pontos_rota, pontos_aguard)
@@ -1851,9 +1965,11 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     # ── Km real do hodômetro (Controle Diário de Atividades) ─────────────
     # Substitui o km estimado por linha reta pelo valor real do hodômetro
     km_real = None
+    deslocamentos_reais = []
     try:
         _client_km = conectar_sheets()
         km_real = ler_km_hodometro(_client_km)
+        deslocamentos_reais = _ler_deslocamentos_controle(_client_km)
     except Exception as _e:
         print(f"   ⚠️  Controle KM: erro na conexão — {_e}")
 
@@ -1862,6 +1978,13 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
         stats_atual["km_fonte"] = "hodômetro"
     else:
         stats_atual["km_fonte"] = "estimado"
+
+    # Top 5 maiores e menores deslocamentos diários reais
+    if deslocamentos_reais:
+        desl_ord = sorted(deslocamentos_reais, key=lambda x: x["km"], reverse=True)
+        stats_atual["top_maiores"] = desl_ord[:5]
+        stats_atual["top_menores"] = sorted(deslocamentos_reais, key=lambda x: x["km"])[:5]
+        print(f"   ✅ {len(deslocamentos_reais)} deslocamentos diários lidos para o dashboard.")
 
     dash_data = {
         "label_atual":    label_atual,
@@ -3625,14 +3748,20 @@ function renderDashboard() {{
     var el = document.getElementById(elId);
     el.innerHTML = '';
     if (!lista || !lista.length) {{
-      el.innerHTML = '<div style="color:#aaa;font-size:12px;padding:8px">Sem dados suficientes</div>';
+      el.innerHTML = '<div style="color:#aaa;font-size:12px;padding:8px">Sem dados da planilha de controle</div>';
       return;
     }}
     lista.forEach(function(d, i) {{
+      var horario = (d.inicio && d.termino)
+        ? '<br><span style="color:#888;font-size:10px;">⏱ ' + d.inicio + ' — ' + d.termino + '</span>'
+        : (d.inicio ? '<br><span style="color:#888;font-size:10px;">⏱ ' + d.inicio + '</span>' : '');
       el.innerHTML +=
         '<div class="desl-item">' +
         '<div class="desl-rank ' + classRank + '">' + (i+1) + '</div>' +
-        '<div class="desl-rota"><b>' + d.de + '</b> → <b>' + d.para + '</b></div>' +
+        '<div class="desl-rota">' +
+          '<b>' + (d.de||'—') + '</b> → <b>' + (d.para||'—') + '</b>' +
+          horario +
+        '</div>' +
         '<div class="desl-km ' + classRank + '">' + d.km + ' km</div>' +
         '</div>';
     }});
