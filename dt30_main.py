@@ -38,7 +38,8 @@ GITHUB_TOKEN_PATH  = BASE_DIR / "github_token.txt"
 HOTEIS_PATH        = BASE_DIR / "HOTEIS.xlsx"
 HOTEIS_SHEET_ID    = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
 HOTEIS_GID         = 965678690
-MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"   # ← NOVO
+MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"
+CONTROLE_KM_ID     = "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k"  # Controle Diário de Atividades
 
 # Status da planilha
 ST_CONCLUIDO    = "✓ Atividade concluída"
@@ -891,7 +892,56 @@ def ler_atividades_sheets(ws):
     return pd.DataFrame(registros)
 
 
-def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None):
+def verificar_historico_site(site, historico_meses):
+    """
+    Verifica se o site já foi visitado em meses anteriores.
+    Retorna lista de visitas anteriores ordenadas da mais recente para a mais antiga.
+    Cada item: {"label": "Março/2026", "tipo": "improdutiva", "concluido": "..."}
+    """
+    site_norm = remove_acentos(str(site).strip().upper())
+    visitas = []
+
+    for ano, meses in sorted(historico_meses.items(), reverse=True):
+        for mes, pac in sorted(meses.items(), key=lambda x: int(x[0]), reverse=True):
+            for ponto in pac.get("pontos", []):
+                ponto_norm = remove_acentos(str(ponto.get("id", "")).strip().upper())
+                if ponto_norm == site_norm:
+                    visitas.append({
+                        "label":     pac["label"],
+                        "tipo":      ponto.get("tipo", ""),
+                        "concluido": ponto.get("concluido", ""),
+                    })
+
+    return visitas
+
+
+def montar_alerta_historico(site, visitas):
+    """
+    Monta string de alerta para coluna CONCLUIDO.
+    Ex:
+        ⚠️ Já visitado:
+        • Março/2026 — improdutivo
+        • Janeiro/2026 — concluído
+    """
+    if not visitas:
+        return ""
+
+    tipo_label = {
+        "concluida":   "concluído",
+        "improdutiva": "improdutivo",
+        "cancelada":   "cancelado",
+    }
+
+    linhas = [f"⚠️ {site} já visitado:"]
+    for v in visitas:
+        tipo = tipo_label.get(v["tipo"], v["tipo"])
+        obs  = f" · {v['concluido'][:40]}" if v["concluido"] and v["concluido"] not in (".", "") else ""
+        linhas.append(f"• {v['label']} — {tipo}{obs}")
+
+    return "\n".join(linhas)
+
+
+def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None, historico_meses=None):
     print("   Montando linhas...")
 
     def _coord(v):
@@ -900,8 +950,9 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
         except Exception:
             return str(v) if v else ""
 
-    def formatar_linha(row_dict, status_override=None):
+    def formatar_linha(row_dict, status_override=None, concluido_override=None):
         status = status_override if status_override is not None else row_dict.get("STATUS", "")
+        concluido = concluido_override if concluido_override is not None else str(row_dict.get("CONCLUIDO", "") or "")
         return [
             str(row_dict.get("DEMANDA",    "")),
             str(row_dict.get("INTEGRAÇÃO", "")),
@@ -914,7 +965,7 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
             str(row_dict.get("2G|3G|4G",   "")),
             str(row_dict.get("5G",         "")),
             str(status),
-            str(row_dict.get("CONCLUIDO",  "") or ""),
+            concluido,
             str(row_dict.get("HOTEL",      "") or ""),
         ]
 
@@ -925,16 +976,26 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
 
     for _, row in df_rota.iterrows():
         row_d = row.to_dict()
-        site = str(row_d.get("SITE", "")).upper()
+        site  = str(row_d.get("SITE", "")).upper()
 
         if site in sites_originais:
             status = row_d.get("STATUS", "")
             if status == ST_NOVA:
                 status = ""
+            concluido_override = None  # já existia — não sobreescrever CONCLUIDO
         else:
             status = ST_NOVA
+            # ── Nova atividade: verificar histórico e gerar alerta ────────
+            concluido_override = None
+            if historico_meses:
+                visitas = verificar_historico_site(site, historico_meses)
+                if visitas:
+                    alerta = montar_alerta_historico(site, visitas)
+                    concluido_override = alerta
+                    print(f"   ⚠️  {site}: visitado {len(visitas)}x anteriormente — alerta gravado.")
 
-        todas_linhas.append(formatar_linha(row_d, status_override=status))
+        todas_linhas.append(formatar_linha(row_d, status_override=status,
+                                           concluido_override=concluido_override))
 
     if df_aguardando is not None and not df_aguardando.empty:
         todas_linhas.append([""] * 13)
@@ -1493,7 +1554,95 @@ def carregar_hoteis():
 # GERAÇÃO DE MAPA — MAPBOX GL JS
 # ============================================================
 
-def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None,
+def ler_km_hodometro(client):
+    """
+    Lê o km total do mês vigente da planilha 'Controle Diário de Atividades'.
+    Busca a aba do mês atual (padrão: 'MAIO - 26'), localiza o total
+    da coluna DESLOCAMENTO (última linha com valor numérico nessa coluna).
+    Retorna float com o km total, ou None se não encontrar.
+    """
+    meses_pt = [
+        "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
+        "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+    ]
+    now = datetime.now()
+    # Padrão da aba: "MAIO - 26"
+    nome_aba = f"{meses_pt[now.month - 1]} - {str(now.year)[-2:]}"
+
+    try:
+        sh = client.open_by_key(CONTROLE_KM_ID)
+    except Exception as e:
+        print(f"   ⚠️  Controle KM: não foi possível abrir a planilha — {e}")
+        return None
+
+    # Tentar encontrar a aba do mês
+    ws_km = None
+    for ws in sh.worksheets():
+        titulo_norm = remove_acentos(ws.title.strip().upper())
+        alvo_norm   = remove_acentos(nome_aba.upper())
+        if titulo_norm == alvo_norm:
+            ws_km = ws
+            break
+
+    if ws_km is None:
+        print(f"   ⚠️  Controle KM: aba '{nome_aba}' não encontrada.")
+        return None
+
+    try:
+        dados = ws_km.get_all_values()
+    except Exception as e:
+        print(f"   ⚠️  Controle KM: erro ao ler aba — {e}")
+        return None
+
+    if not dados:
+        return None
+
+    # Identificar coluna DESLOCAMENTO pelo cabeçalho
+    cabecalho = None
+    col_desl = None
+    for i, linha in enumerate(dados):
+        for j, cel in enumerate(linha):
+            cel_norm = remove_acentos(str(cel).strip().upper())
+            if "DESLOCAMENTO" in cel_norm:
+                cabecalho = i
+                col_desl  = j
+                break
+        if col_desl is not None:
+            break
+
+    if col_desl is None:
+        print("   ⚠️  Controle KM: coluna DESLOCAMENTO não encontrada.")
+        return None
+
+    # Percorrer a coluna de baixo para cima buscando o total
+    # O total é o último valor numérico significativo (geralmente na linha de totais)
+    km_total = None
+    for linha in reversed(dados[cabecalho + 1:]):
+        if col_desl >= len(linha):
+            continue
+        cel = str(linha[col_desl]).strip()
+        if not cel:
+            continue
+        # Limpar "KM", espaços, pontos de milhar, vírgula decimal
+        cel_num = re.sub(r'[^\d.,]', '', cel).replace('.', '').replace(',', '.')
+        try:
+            valor = float(cel_num)
+            if valor > 0:
+                km_total = valor
+                break
+        except ValueError:
+            continue
+
+    if km_total is not None:
+        print(f"   ✅ Controle KM ({nome_aba}): {km_total:.0f} km reais lidos do hodômetro.")
+    else:
+        print(f"   ⚠️  Controle KM: nenhum valor encontrado na coluna DESLOCAMENTO.")
+
+    return km_total
+
+
+def gerar_mapa(
+df_rota, lat0, lon0, cidade0, df_fixas=None,
                df_aguardando=None, historico_meses=None, mapbox_token=None):
     """
     Gera MAPA_ROTAS.html com Mapbox GL JS.
@@ -1608,6 +1757,119 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None,
         print("   ℹ️  Sem atividades pendentes — rota vazia")
 
     j_rota_real = json.dumps(rota_real_data, ensure_ascii=False)
+
+    # ── Calcular estatísticas para o Dashboard ───────────────────────────
+    def _stats_de_pontos(pontos_fixos_lista, pontos_rota_lista, pontos_aguard_lista):
+        """Calcula estatísticas de um conjunto de atividades."""
+        concluidas   = [p for p in pontos_fixos_lista if p.get("tipo") == "concluida"]
+        improdutivas = [p for p in pontos_fixos_lista if p.get("tipo") == "improdutiva"]
+        canceladas   = [p for p in pontos_fixos_lista if p.get("tipo") == "cancelada"]
+        pendentes    = pontos_rota_lista
+        aguardando   = pontos_aguard_lista
+
+        # Calcular km totais percorridos entre pontos concluídos + improdutivos
+        todos_visitados = concluidas + improdutivas
+        km_total = 0.0
+        if len(todos_visitados) > 1:
+            for i in range(1, len(todos_visitados)):
+                la1 = todos_visitados[i-1].get("lat", 0)
+                lo1 = todos_visitados[i-1].get("lon", 0)
+                la2 = todos_visitados[i].get("lat", 0)
+                lo2 = todos_visitados[i].get("lon", 0)
+                if la1 and lo1 and la2 and lo2:
+                    import math as _math
+                    dLat = _math.radians(la2 - la1)
+                    dLon = _math.radians(lo2 - lo1)
+                    a = (_math.sin(dLat/2)**2 +
+                         _math.cos(_math.radians(la1)) * _math.cos(_math.radians(la2)) *
+                         _math.sin(dLon/2)**2)
+                    km_total += 6371 * 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1-a))
+
+        # Top deslocamentos (entre pares consecutivos visitados)
+        deslocamentos = []
+        for i in range(1, len(todos_visitados)):
+            la1 = todos_visitados[i-1].get("lat", 0)
+            lo1 = todos_visitados[i-1].get("lon", 0)
+            la2 = todos_visitados[i].get("lat", 0)
+            lo2 = todos_visitados[i].get("lon", 0)
+            if la1 and lo1 and la2 and lo2:
+                import math as _math
+                dLat = _math.radians(la2 - la1)
+                dLon = _math.radians(lo2 - lo1)
+                a = (_math.sin(dLat/2)**2 +
+                     _math.cos(_math.radians(la1)) * _math.cos(_math.radians(la2)) *
+                     _math.sin(dLon/2)**2)
+                km = 6371 * 2 * _math.atan2(_math.sqrt(a), _math.sqrt(1-a))
+                deslocamentos.append({
+                    "de":  todos_visitados[i-1].get("id", ""),
+                    "para": todos_visitados[i].get("id", ""),
+                    "km":  round(km, 1)
+                })
+
+        deslocamentos_ord = sorted(deslocamentos, key=lambda x: x["km"], reverse=True)
+
+        return {
+            "concluidas":   len(concluidas),
+            "improdutivas": len(improdutivas),
+            "canceladas":   len(canceladas),
+            "pendentes":    len(pendentes),
+            "aguardando":   len(aguardando),
+            "total":        len(concluidas) + len(improdutivas) + len(canceladas),
+            "km_total":     round(km_total, 1),
+            "top_maiores":  deslocamentos_ord[:5],
+            "top_menores":  sorted(deslocamentos, key=lambda x: x["km"])[:5] if deslocamentos else [],
+        }
+
+    # Stats mês atual
+    stats_atual = _stats_de_pontos(pontos_fixos, pontos_rota, pontos_aguard)
+
+    # Stats mês anterior (último mês no histórico)
+    stats_anterior = None
+    label_anterior = ""
+    if historico_meses:
+        anos_ord = sorted(historico_meses.keys(), reverse=True)
+        for ano_k in anos_ord:
+            meses_ord = sorted(historico_meses[ano_k].keys(),
+                               key=lambda x: int(x), reverse=True)
+            if meses_ord:
+                mes_k = meses_ord[0]
+                pac_ant = historico_meses[ano_k][mes_k]
+                label_anterior = pac_ant.get("label", "")
+                pontos_ant = pac_ant.get("pontos", [])
+                fixos_ant  = [p for p in pontos_ant if p.get("tipo") in
+                              ("concluida", "improdutiva", "cancelada")]
+                stats_anterior = _stats_de_pontos(fixos_ant, [], [])
+                break
+
+    # Mês atual label
+    meses_pt = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+                "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
+    from datetime import datetime as _dt
+    now = _dt.now()
+    label_atual = f"{meses_pt[now.month-1]}/{now.year}"
+
+    # ── Km real do hodômetro (Controle Diário de Atividades) ─────────────
+    # Substitui o km estimado por linha reta pelo valor real do hodômetro
+    km_real = None
+    try:
+        _client_km = conectar_sheets()
+        km_real = ler_km_hodometro(_client_km)
+    except Exception as _e:
+        print(f"   ⚠️  Controle KM: erro na conexão — {_e}")
+
+    if km_real is not None:
+        stats_atual["km_total"] = round(km_real, 1)
+        stats_atual["km_fonte"] = "hodômetro"
+    else:
+        stats_atual["km_fonte"] = "estimado"
+
+    dash_data = {
+        "label_atual":    label_atual,
+        "label_anterior": label_anterior,
+        "atual":          stats_atual,
+        "anterior":       stats_anterior,
+    }
+    j_dash = json.dumps(dash_data, ensure_ascii=False)
 
     # ── Token Mapbox: salvo em arquivo JS separado (fora do HTML) ──
     # O HTML carrega mapbox_config.js que NÃO vai para o GitHub.
@@ -1725,28 +1987,89 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 /* ── Resultado busca global ─────────────────────── */
 #resultado-busca-global{{
   display:none;position:absolute;top:88px;right:330px;z-index:1002;
-  width:min(360px,calc(100vw - 24px));max-height:64vh;overflow:auto;
+  width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;
   background:rgba(255,255,255,.98);border-radius:10px;
   box-shadow:0 6px 24px rgba(0,0,0,.22);padding:12px 14px;
 }}
 #resultado-busca-global.visivel{{display:block;}}
-.bg-topo{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}}
+.bg-topo{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px;}}
 .bg-titulo{{font-size:13px;font-weight:700;color:#1a237e;}}
+.bg-subtitulo{{font-size:11px;color:#888;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid #e6e8ef;}}
 #btn-fechar-bg{{
   width:26px;height:26px;border:none;border-radius:6px;
   background:#eef1f7;color:#1a237e;font-weight:800;cursor:pointer;
 }}
-.bg-item{{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
-  border-top:1px solid #e6e8ef;padding:8px 0;font-size:12px;color:#333;
+
+/* ── Linha de mês (agrupamento) ─── */
+.bg-mes-row{{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  border-top:1px solid #e6e8ef;padding:9px 0 6px;
 }}
-.bg-item:first-child{{border-top:none;}}
-.bg-site{{font-weight:700;color:#1a237e;}}
+.bg-mes-row:first-child{{border-top:none;}}
+.bg-mes-info{{flex:1;min-width:0;}}
+.bg-mes-nome{{font-size:12px;font-weight:700;color:#1a237e;}}
+.bg-mes-badge{{
+  display:inline-block;margin-left:6px;font-size:10px;font-weight:700;
+  background:#e8f0ff;color:#1a237e;border-radius:10px;padding:1px 7px;
+}}
+.bg-mes-tipo{{font-size:11px;color:#888;margin-top:1px;}}
+
+/* ── Botão VER ─── */
 .bg-ver{{
   border:none;border-radius:6px;background:#1a237e;color:white;
-  font-size:11px;font-weight:700;padding:5px 8px;cursor:pointer;white-space:nowrap;
+  font-size:11px;font-weight:700;padding:6px 10px;cursor:pointer;white-space:nowrap;
 }}
 .bg-ver:hover{{background:#121858;}}
+
+/* ── Múltiplas visitas no mesmo mês (expansível) ─── */
+.bg-visitas{{
+  margin:4px 0 6px 12px;border-left:3px solid #e0e6ff;padding-left:10px;
+}}
+.bg-visita-item{{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:6px;padding:5px 0;border-bottom:1px dashed #eee;font-size:11px;
+}}
+.bg-visita-item:last-child{{border-bottom:none;}}
+.bg-visita-num{{color:#888;font-size:10px;min-width:18px;}}
+.bg-visita-info{{flex:1;color:#444;}}
+.bg-ver-sm{{
+  border:none;border-radius:5px;background:#eef2ff;color:#1a237e;
+  font-size:10px;font-weight:700;padding:4px 8px;cursor:pointer;white-space:nowrap;
+}}
+.bg-ver-sm:hover{{background:#c7d4ff;}}
+
+/* ── Popup de relatório inline ─── */
+.bg-relatorio{{
+  margin:4px 0 6px 12px;padding:10px 12px;
+  background:#f8f9ff;border-left:3px solid #2A52BE;border-radius:0 6px 6px 0;
+  font-size:11px;color:#333;line-height:1.6;display:none;
+}}
+.bg-relatorio.aberto{{display:block;}}
+.bg-rel-label{{font-weight:700;color:#1a237e;font-size:11px;margin-bottom:4px;}}
+.bg-rel-texto{{white-space:pre-wrap;word-break:break-word;color:#444;}}
+.bg-rel-tipo{{
+  display:inline-block;margin-top:6px;font-size:10px;font-weight:700;
+  padding:2px 8px;border-radius:10px;
+}}
+.bg-rel-conc{{background:#d4edda;color:#155724;}}
+.bg-rel-impr{{background:#f8d7da;color:#721c24;}}
+.bg-rel-canc{{background:#eceff1;color:#455a64;}}
+
+/* ── Site header ─── */
+.bg-site-header{{
+  display:flex;align-items:center;gap:8px;margin-bottom:8px;
+}}
+.bg-site{{font-weight:700;color:#1a237e;font-size:14px;}}
+.bg-total-badge{{
+  font-size:11px;font-weight:600;background:#1a237e;color:white;
+  border-radius:10px;padding:2px 9px;
+}}
+
+/* ── Ano separador ─── */
+.bg-ano-sep{{
+  font-size:10px;font-weight:700;color:#aaa;letter-spacing:1px;
+  text-transform:uppercase;padding:6px 0 2px;
+}}
 
 /* ── Ponto de partida (animado) ─────────────────── */
 .partida-pulse{{
@@ -1863,6 +2186,121 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
   body.painel-aberto #painel-toggle{{display:none;}}
   #resultado-busca-global{{right:52px;top:92px;width:calc(100vw - 68px);max-height:56vh;}}
 }}
+/* ── Dashboard modal ─────────────────────────────────────── */
+#dash-overlay{{
+  display:none;position:fixed;inset:0;z-index:4000;
+  background:rgba(1,38,25,.72);backdrop-filter:blur(3px);
+  align-items:center;justify-content:center;padding:16px;
+}}
+#dash-overlay.visivel{{display:flex;}}
+#dash-box{{
+  background:#F4F4E7;border-radius:16px;width:100%;max-width:680px;
+  max-height:90vh;overflow-y:auto;box-shadow:0 12px 48px rgba(0,0,0,.35);
+  animation:dashIn .28s ease-out;
+}}
+@keyframes dashIn{{
+  from{{transform:translateY(24px);opacity:0;}}
+  to{{transform:translateY(0);opacity:1;}}
+}}
+.dash-header{{
+  background:linear-gradient(135deg,#012619,#0B873D);
+  border-radius:16px 16px 0 0;padding:20px 24px 16px;
+  display:flex;align-items:center;justify-content:space-between;
+}}
+.dash-header h2{{margin:0;color:#A9D9C2;font-size:17px;letter-spacing:.4px;}}
+.dash-header span{{color:#78BF9E;font-size:12px;margin-top:2px;display:block;}}
+#btn-fechar-dash{{
+  background:rgba(255,255,255,.12);border:none;color:#E8E5DE;
+  width:32px;height:32px;border-radius:8px;font-size:18px;
+  cursor:pointer;font-weight:700;
+}}
+#btn-fechar-dash:hover{{background:rgba(255,255,255,.22);}}
+
+.dash-body{{padding:20px 20px 24px;}}
+
+/* ── KPI Cards ─── */
+.dash-kpi-grid{{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;
+}}
+.kpi-card{{
+  background:#fff;border-radius:12px;padding:14px 12px;text-align:center;
+  box-shadow:0 2px 8px rgba(0,0,0,.07);
+}}
+.kpi-valor{{font-size:28px;font-weight:800;line-height:1;}}
+.kpi-label{{font-size:10px;font-weight:600;color:#888;letter-spacing:.5px;
+  text-transform:uppercase;margin-top:4px;}}
+.kpi-delta{{font-size:10px;font-weight:600;margin-top:4px;}}
+.delta-up{{color:#0B873D;}} .delta-down{{color:#F24141;}} .delta-eq{{color:#888;}}
+
+.kc-conc{{border-top:3px solid #0B873D;}} .kc-conc .kpi-valor{{color:#0B873D;}}
+.kc-impr{{border-top:3px solid #F24141;}} .kc-impr .kpi-valor{{color:#F24141;}}
+.kc-pend{{border-top:3px solid #FFB400;}} .kc-pend .kpi-valor{{color:#FFB400;}}
+.kc-km  {{border-top:3px solid #0468BF;}} .kc-km .kpi-valor{{color:#0468BF;font-size:22px;}}
+.kc-canc{{border-top:3px solid #CAC8AF;}} .kc-canc .kpi-valor{{color:#888;}}
+.kc-aguard{{border-top:3px solid #78B593;}} .kc-aguard .kpi-valor{{color:#78B593;}}
+
+/* ── Barra de progresso ─── */
+.dash-section{{margin-bottom:18px;}}
+.dash-section-title{{
+  font-size:11px;font-weight:700;color:#012619;letter-spacing:.7px;
+  text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px;
+}}
+.progress-bar-bg{{
+  background:#E8E5DE;border-radius:99px;height:10px;overflow:hidden;
+}}
+.progress-bar-fill{{
+  height:100%;border-radius:99px;
+  background:linear-gradient(90deg,#0B873D,#4EA664);
+  transition:width .6s ease;
+}}
+.progress-label{{
+  display:flex;justify-content:space-between;font-size:11px;
+  color:#888;margin-top:4px;
+}}
+
+/* ── Comparativo ─── */
+.dash-comp-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+.comp-card{{
+  background:#fff;border-radius:10px;padding:12px 14px;
+  box-shadow:0 2px 6px rgba(0,0,0,.06);
+}}
+.comp-mes{{font-size:11px;font-weight:700;color:#012619;margin-bottom:8px;}}
+.comp-row{{display:flex;justify-content:space-between;font-size:12px;
+  color:#555;padding:3px 0;border-bottom:1px solid #f0f0f0;}}
+.comp-row:last-child{{border-bottom:none;}}
+.comp-row b{{color:#012619;}}
+
+/* ── Deslocamentos ─── */
+.desl-lista{{display:flex;flex-direction:column;gap:6px;}}
+.desl-item{{
+  display:flex;align-items:center;gap:8px;background:#fff;
+  border-radius:8px;padding:9px 12px;box-shadow:0 1px 4px rgba(0,0,0,.06);
+}}
+.desl-rank{{
+  font-size:11px;font-weight:800;color:#fff;background:#0468BF;
+  width:20px;height:20px;border-radius:50%;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;
+}}
+.desl-rank.menor{{background:#78B593;}}
+.desl-rota{{flex:1;font-size:11px;color:#444;}}
+.desl-rota b{{color:#012619;}}
+.desl-km{{font-size:12px;font-weight:700;color:#0468BF;white-space:nowrap;}}
+.desl-km.menor{{color:#78B593;}}
+
+/* ── Tabs internos dashboard ─── */
+.dash-tabs{{display:flex;gap:6px;margin-bottom:14px;}}
+.dash-tab{{
+  padding:6px 14px;border:none;border-radius:6px;font-size:12px;
+  font-weight:700;cursor:pointer;background:#E8E5DE;color:#012619;
+}}
+.dash-tab.ativo{{background:#012619;color:#A9D9C2;}}
+.dash-tab-panel{{display:none;}}
+.dash-tab-panel.ativo{{display:block;}}
+
+@media(max-width:500px){{
+  .dash-kpi-grid{{grid-template-columns:repeat(2,1fr);}}
+  .dash-comp-grid{{grid-template-columns:1fr;}}
+}}
 </style>
 </head>
 <body>
@@ -1890,6 +2328,14 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 
 <div id="painel">
   <h4>DT 3.0 — Rota</h4>
+
+  <!-- Botão Dashboard -->
+  <button onclick="abrirDashboard()" style="
+    width:100%;margin-bottom:10px;padding:8px;border:none;border-radius:8px;
+    background:linear-gradient(135deg,#0468BF,#2B96D9);color:white;
+    font-size:12px;font-weight:700;cursor:pointer;letter-spacing:.4px;
+    box-shadow:0 2px 8px rgba(4,104,191,.25);
+  ">📊 Ver Produtividade</button>
 
   <div class="tabs-mapa">
     <button class="tab-mapa ativo" id="tab-atual" onclick="mostrarAba('atual')">Atual</button>
@@ -1964,6 +2410,7 @@ var FIXOS         = {j_fixos};
 var AGUARD        = {j_aguard};
 var HOTEIS        = {j_hoteis};
 var ANTERIORES    = {j_hist};
+var DASH_STATS    = {j_dash};  // ← Estatísticas para o dashboard
 
 // ══════════════════════════════════════════════════════════════
 // CONTROLE DE QUOTA MAPBOX (persistido em localStorage)
@@ -2583,25 +3030,46 @@ function buscarSite() {{
   var chave = normBusca(document.getElementById('busca-site').value);
   if (!chave) {{ mostrarMsg('msg-busca', ''); return; }}
 
-  // 1) Mês atual
-  var item = indiceSites[chave];
-  if (item) {{
-    map.closeAllPopups ? map.closeAllPopups() : null;
-    map.flyTo({{center:[item.lon, item.lat], zoom: Math.max(map.getZoom(), 13), duration:900}});
-    setTimeout(function(){{ item.marker.togglePopup(); }}, 950);
-    mostrarMsg('msg-busca', '');
+  // Coletar ocorrências no mês atual
+  var ocsAtual = [];
+  var itemAtual = indiceSites[chave];
+
+  // Buscar também em FIXOS e ROTA para o mês atual
+  var todosAtual = [].concat(
+    FIXOS.map(function(p){{ return {{ponto:p, atual:true}}; }}),
+    ROTA.map(function(p){{ return {{ponto:p, atual:true}}; }})
+  );
+  todosAtual.forEach(function(entry) {{
+    var p = entry.ponto;
+    var k = normBusca(p.id);
+    if (k === chave || (k.length >= 3 && k.slice(-3) === chave)) {{
+      ocsAtual.push({{ano:'atual', mes:'atual', label:'Mês atual', ponto:p, atual:true}});
+    }}
+  }});
+
+  // Buscar histórico
+  var ocsHist = buscarSiteHistorico(chave);
+
+  var todas = [].concat(ocsAtual, ocsHist);
+
+  if (!todas.length) {{
+    mostrarMsg('msg-busca', 'Site não encontrado!');
     return;
   }}
 
-  // 2) Meses anteriores
-  var ocs = buscarSiteHistorico(chave);
-  if (ocs.length) {{
-    mostrarMsg('msg-busca', '');
-    mostrarBuscaGlobal(chave, ocs);
+  mostrarMsg('msg-busca', '');
+
+  // Se só tem no mês atual (1 ocorrência) → navegar direto + abre painel se histórico existe
+  if (ocsAtual.length === 1 && !ocsHist.length) {{
+    if (itemAtual) {{
+      map.flyTo({{center:[itemAtual.lon, itemAtual.lat], zoom:Math.max(map.getZoom(),13), duration:900}});
+      setTimeout(function(){{ itemAtual.marker.togglePopup(); }}, 950);
+    }}
     return;
   }}
 
-  mostrarMsg('msg-busca', 'Site não encontrado!');
+  // Caso geral: mostrar painel completo de visitas
+  mostrarBuscaGlobal(chave, todas);
 }}
 
 document.getElementById('busca-site').addEventListener('keydown', function(ev) {{
@@ -2613,7 +3081,7 @@ document.getElementById('busca-site').addEventListener('input', function() {{
 }});
 
 // ══════════════════════════════════════════════════════════════
-// BUSCA GLOBAL (meses anteriores)
+// BUSCA GLOBAL — histório completo de visitas ao site
 // ══════════════════════════════════════════════════════════════
 function buscarSiteHistorico(chave) {{
   var achados = [];
@@ -2623,7 +3091,7 @@ function buscarSiteHistorico(chave) {{
       (pac.pontos||[]).forEach(function(p) {{
         var k = normBusca(p.id);
         if (k === chave || (k.length >= 3 && k.slice(-3) === chave)) {{
-          achados.push({{ano:ano, mes:mes, label:pac.label, ponto:p}});
+          achados.push({{ano:ano, mes:mes, label:pac.label, ponto:p, atual:false}});
         }}
       }});
     }});
@@ -2635,26 +3103,232 @@ function fecharBuscaGlobal() {{
   document.getElementById('resultado-busca-global').classList.remove('visivel');
 }}
 
-function mostrarBuscaGlobal(chave, ocs) {{
-  ocorrenciasBG = ocs;
-  var titulo = document.getElementById('bg-titulo');
+function _tipoLabel(tipo) {{
+  if (!tipo) return '';
+  if (tipo === 'concluida') return '<span class="bg-rel-tipo bg-rel-conc">✓ Concluída</span>';
+  if (tipo === 'cancelada')  return '<span class="bg-rel-tipo bg-rel-canc">⊘ Cancelada</span>';
+  return '<span class="bg-rel-tipo bg-rel-impr">✗ Improdutiva</span>';
+}}
+
+function mostrarBuscaGlobal(chave, todas) {{
+  ocorrenciasBG = todas;
   var lista = document.getElementById('bg-lista');
-  titulo.textContent = 'Site "' + document.getElementById('busca-site').value.toUpperCase() + '" encontrado em:';
+  var siteId = document.getElementById('busca-site').value.toUpperCase() || todas[0].ponto.id;
+
+  document.getElementById('bg-titulo').textContent = siteId;
   lista.innerHTML = '';
-  ocs.forEach(function(oc, idx) {{
-    var row = document.createElement('div');
-    row.className = 'bg-item';
-    var txt = document.createElement('div');
-    txt.innerHTML = '<span class="bg-site">' + oc.ponto.id + '</span> — ' + oc.label;
-    var btn = document.createElement('button');
-    btn.className = 'bg-ver';
-    btn.textContent = 'ver';
-    btn.onclick = (function(i){{ return function(){{ abrirOcBG(i); }}; }})(idx);
-    row.appendChild(txt);
-    row.appendChild(btn);
-    lista.appendChild(row);
+
+  // Cabeçalho: total de visitas
+  var totalDiv = document.createElement('div');
+  totalDiv.className = 'bg-subtitulo';
+  totalDiv.innerHTML = '<b>' + todas.length + '</b> visita' + (todas.length > 1 ? 's' : '') + ' registrada' + (todas.length > 1 ? 's' : '');
+  lista.appendChild(totalDiv);
+
+  // ── Agrupar por ano/mês ─────────────────────────────────────
+  // Estrutura: grupos por chave ano/mes com label e lista de itens
+  var grupos = {{}};
+  var ordemGrupos = [];
+
+  todas.forEach(function(oc) {{
+    var chaveGrupo = oc.atual ? 'atual' : (oc.ano + '/' + oc.mes);
+    if (!grupos[chaveGrupo]) {{
+      grupos[chaveGrupo] = {{ label: oc.label, ano: oc.ano, mes: oc.mes, atual: oc.atual, itens: [] }};
+      ordemGrupos.push(chaveGrupo);
+    }}
+    grupos[chaveGrupo].itens.push(oc);
   }});
+
+  var anoAnterior = null;
+
+  ordemGrupos.forEach(function(chaveGrupo) {{
+    var grupo = grupos[chaveGrupo];
+    var itens = grupo.itens;
+    var ano = grupo.atual ? 'Mês atual' : grupo.ano;
+
+    // Separador de ano
+    if (!grupo.atual && ano !== anoAnterior) {{
+      var anoDiv = document.createElement('div');
+      anoDiv.className = 'bg-ano-sep';
+      anoDiv.textContent = ano;
+      lista.appendChild(anoDiv);
+      anoAnterior = ano;
+    }} else if (grupo.atual) {{
+      anoAnterior = null;
+    }}
+
+    // ── Linha do mês ──────────────────────────────────────────
+    var mesRow = document.createElement('div');
+    mesRow.className = 'bg-mes-row';
+
+    var mesInfo = document.createElement('div');
+    mesInfo.className = 'bg-mes-info';
+
+    // Nome do mês + badge de contagem se > 1
+    var mesNome = document.createElement('div');
+    mesNome.className = 'bg-mes-nome';
+    var labelMes = grupo.atual ? 'Mês atual' : grupo.label.split('/')[0];
+    mesNome.innerHTML = labelMes;
+    if (itens.length > 1) {{
+      mesNome.innerHTML += ' <span class="bg-mes-badge">' + itens.length + ' visitas</span>';
+    }}
+    mesInfo.appendChild(mesNome);
+
+    // Tipo da(s) visita(s) se único
+    if (itens.length === 1 && itens[0].ponto.tipo) {{
+      var tipoDiv = document.createElement('div');
+      tipoDiv.className = 'bg-mes-tipo';
+      tipoDiv.innerHTML = itens[0].ponto.tipo === 'concluida' ? '✓ Concluída'
+                        : itens[0].ponto.tipo === 'cancelada'  ? '⊘ Cancelada'
+                        : '✗ Improdutiva';
+      mesInfo.appendChild(tipoDiv);
+    }}
+
+    mesRow.appendChild(mesInfo);
+
+    // ── Botão VER ────────────────────────────────────────────
+    // 1 visita: VER navega diretamente + abre popup de relatório
+    // N visitas: VER expande lista de sub-visitas
+    var relDiv = document.createElement('div');
+    relDiv.className = 'bg-relatorio';
+    var idRel = 'rel-' + chaveGrupo.replace(/[^a-z0-9]/gi, '-');
+    relDiv.id = idRel;
+
+    var btnVer = document.createElement('button');
+    btnVer.className = 'bg-ver';
+    btnVer.textContent = 'ver';
+
+    if (itens.length === 1) {{
+      // Uma visita — ver navega para o mapa e mostra relatório
+      (function(item, rel) {{
+        btnVer.onclick = function() {{
+          toggleRelatorio(rel, item);
+          if (!item.atual) {{
+            document.getElementById('sel-ano-ant').value = item.ano;
+            preencherMeses();
+            document.getElementById('sel-mes-ant').value = item.mes;
+            mostrarAba('anteriores');
+            mostrarMesAnterior(item.ano, item.mes, normBusca(item.ponto.id));
+          }} else {{
+            var idx = indiceSites[normBusca(item.ponto.id)];
+            if (idx) {{
+              map.flyTo({{center:[idx.lon, idx.lat], zoom:13, duration:700}});
+              setTimeout(function(){{ idx.marker.togglePopup(); }}, 750);
+            }}
+          }}
+        }};
+      }})(itens[0], relDiv);
+
+      // Conteúdo do relatório
+      _preencherRelatorio(relDiv, itens[0].ponto);
+
+    }} else {{
+      // Múltiplas visitas — ver expande lista de sub-visitas
+      var subDiv = document.createElement('div');
+      subDiv.className = 'bg-visitas';
+      subDiv.style.display = 'none';
+      var subId = 'sub-' + chaveGrupo.replace(/[^a-z0-9]/gi, '-');
+      subDiv.id = subId;
+
+      itens.forEach(function(item, idx) {{
+        var subRow = document.createElement('div');
+        subRow.className = 'bg-visita-item';
+
+        var numSpan = document.createElement('span');
+        numSpan.className = 'bg-visita-num';
+        numSpan.textContent = (idx + 1) + 'ª';
+
+        var infoSpan = document.createElement('span');
+        infoSpan.className = 'bg-visita-info';
+        var tipoTxt = item.ponto.tipo === 'concluida' ? '✓ Concluída'
+                    : item.ponto.tipo === 'cancelada'  ? '⊘ Cancelada'
+                    : item.ponto.tipo ? '✗ Improdutiva' : 'Pendente';
+        infoSpan.textContent = tipoTxt;
+        if (item.ponto.concluido && item.ponto.concluido !== '.') {{
+          infoSpan.textContent += ' · ' + item.ponto.concluido.substring(0, 30) + (item.ponto.concluido.length > 30 ? '…' : '');
+        }}
+
+        var btnSub = document.createElement('button');
+        btnSub.className = 'bg-ver-sm';
+        btnSub.textContent = 'ver';
+
+        // Relatório individual para cada sub-visita
+        var subRelDiv = document.createElement('div');
+        subRelDiv.className = 'bg-relatorio';
+        var subRelId = 'rel-' + chaveGrupo.replace(/[^a-z0-9]/gi,'-') + '-' + idx;
+        subRelDiv.id = subRelId;
+        _preencherRelatorio(subRelDiv, item.ponto);
+
+        (function(it, rel) {{
+          btnSub.onclick = function() {{
+            toggleRelatorio(rel, it);
+            if (!it.atual) {{
+              document.getElementById('sel-ano-ant').value = it.ano;
+              preencherMeses();
+              document.getElementById('sel-mes-ant').value = it.mes;
+              mostrarAba('anteriores');
+              mostrarMesAnterior(it.ano, it.mes, normBusca(it.ponto.id));
+            }}
+          }};
+        }})(item, subRelDiv);
+
+        subRow.appendChild(numSpan);
+        subRow.appendChild(infoSpan);
+        subRow.appendChild(btnSub);
+        subDiv.appendChild(subRow);
+        subDiv.appendChild(subRelDiv);
+      }});
+
+      (function(sub) {{
+        btnVer.onclick = function() {{
+          var aberto = sub.style.display !== 'none';
+          sub.style.display = aberto ? 'none' : 'block';
+          btnVer.textContent = aberto ? 'ver' : 'fechar';
+        }};
+      }})(subDiv);
+
+      // Inserir subDiv logo após o mesRow
+      mesRow.appendChild(btnVer);
+      lista.appendChild(mesRow);
+      lista.appendChild(subDiv);
+      return;  // pular o appendChild abaixo
+    }}
+
+    mesRow.appendChild(btnVer);
+    lista.appendChild(mesRow);
+    lista.appendChild(relDiv);
+  }});
+
   document.getElementById('resultado-busca-global').classList.add('visivel');
+}}
+
+function _preencherRelatorio(div, ponto) {{
+  var conteudo = '';
+
+  if (ponto.concluido && ponto.concluido !== '.' && ponto.concluido.trim()) {{
+    conteudo += '<div class="bg-rel-label">📋 Relatório:</div>';
+    conteudo += '<div class="bg-rel-texto">' + ponto.concluido.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+  }} else {{
+    conteudo += '<div class="bg-rel-texto" style="color:#aaa;font-style:italic;">Sem observações registradas</div>';
+  }}
+
+  if (ponto.hotel && ponto.hotel !== '.') {{
+    conteudo += '<div style="margin-top:6px;font-size:11px;color:#e67e22;">🏨 ' + ponto.hotel + '</div>';
+  }}
+
+  conteudo += _tipoLabel(ponto.tipo || '');
+
+  div.innerHTML = conteudo;
+}}
+
+function toggleRelatorio(div, item) {{
+  var estaAberto = div.classList.contains('aberto');
+  // Fechar todos os outros abertos
+  document.querySelectorAll('.bg-relatorio.aberto').forEach(function(el) {{
+    el.classList.remove('aberto');
+  }});
+  if (!estaAberto) {{
+    div.classList.add('aberto');
+  }}
 }}
 
 function abrirOcBG(idx) {{
@@ -2804,6 +3478,171 @@ if (lerUso() >= LIMITE_QUOTA) {{
 }}
 
 </script>
+<!-- ═══════════════ DASHBOARD MODAL ═══════════════ -->
+<div id="dash-overlay">
+  <div id="dash-box">
+    <div class="dash-header">
+      <div>
+        <h2>📊 Dashboard de Produtividade</h2>
+        <span id="dash-periodo"></span>
+      </div>
+      <button id="btn-fechar-dash" onclick="fecharDashboard()">✕</button>
+    </div>
+    <div class="dash-body">
+
+      <!-- Tabs -->
+      <div class="dash-tabs">
+        <button class="dash-tab ativo" onclick="dashTab('resumo',this)">Resumo</button>
+        <button class="dash-tab" onclick="dashTab('comparativo',this)">Comparativo</button>
+        <button class="dash-tab" onclick="dashTab('deslocamentos',this)">Deslocamentos</button>
+      </div>
+
+      <!-- Tab Resumo -->
+      <div class="dash-tab-panel ativo" id="dtab-resumo">
+        <div class="dash-kpi-grid" id="dash-kpis"></div>
+        <div class="dash-section">
+          <div class="dash-section-title">⚡ Taxa de Conclusão</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="dash-progress" style="width:0%"></div>
+          </div>
+          <div class="progress-label">
+            <span id="dash-prog-label-esq"></span>
+            <span id="dash-prog-pct"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab Comparativo -->
+      <div class="dash-tab-panel" id="dtab-comparativo">
+        <div class="dash-comp-grid" id="dash-comp"></div>
+      </div>
+
+      <!-- Tab Deslocamentos -->
+      <div class="dash-tab-panel" id="dtab-deslocamentos">
+        <div class="dash-section">
+          <div class="dash-section-title">🔴 Maiores deslocamentos</div>
+          <div class="desl-lista" id="dash-maiores"></div>
+        </div>
+        <div class="dash-section" style="margin-top:16px">
+          <div class="dash-section-title">🟢 Menores deslocamentos</div>
+          <div class="desl-lista" id="dash-menores"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// DASHBOARD DE PRODUTIVIDADE
+// ══════════════════════════════════════════════════════════════
+
+function dashTab(nome, btn) {{
+  document.querySelectorAll('.dash-tab').forEach(function(b){{ b.classList.remove('ativo'); }});
+  document.querySelectorAll('.dash-tab-panel').forEach(function(p){{ p.classList.remove('ativo'); }});
+  btn.classList.add('ativo');
+  document.getElementById('dtab-' + nome).classList.add('ativo');
+}}
+
+function abrirDashboard() {{
+  renderDashboard();
+  document.getElementById('dash-overlay').classList.add('visivel');
+}}
+
+function fecharDashboard() {{
+  document.getElementById('dash-overlay').classList.remove('visivel');
+}}
+
+document.getElementById('dash-overlay').addEventListener('click', function(e) {{
+  if (e.target === this) fecharDashboard();
+}});
+
+function _delta(atual, anterior) {{
+  if (anterior == null || anterior === 0) return '';
+  var diff = atual - anterior;
+  if (diff > 0) return '<span class="delta-up">▲ ' + diff + ' vs mês ant.</span>';
+  if (diff < 0) return '<span class="delta-down">▼ ' + Math.abs(diff) + ' vs mês ant.</span>';
+  return '<span class="delta-eq">= igual ao mês ant.</span>';
+}}
+
+function renderDashboard() {{
+  var d = DASH_STATS;
+  var a = d.atual;
+  var ant = d.anterior;
+
+  document.getElementById('dash-periodo').textContent = d.label_atual;
+
+  // ── KPIs ─────────────────────────────────────────────────
+  var kpis = [
+    {{ cls:'kc-conc',  valor:a.concluidas,   label:'Concluídas',   delta: ant ? _delta(a.concluidas, ant.concluidas) : '' }},
+    {{ cls:'kc-impr',  valor:a.improdutivas, label:'Improdutivas', delta: ant ? _delta(a.improdutivas, ant.improdutivas) : '' }},
+    {{ cls:'kc-pend',  valor:a.pendentes,    label:'Pendentes',    delta: '' }},
+    {{ cls:'kc-km',    valor:a.km_total+' km', label: (a.km_fonte === 'hodômetro' ? 'Km reais (hodômetro)' : 'Km estimados'), delta: ant ? _delta(Math.round(a.km_total), Math.round(ant.km_total || 0)) : '' }},
+    {{ cls:'kc-canc',  valor:a.canceladas,   label:'Canceladas',   delta: '' }},
+    {{ cls:'kc-aguard',valor:a.aguardando,   label:'Aguardando',   delta: '' }},
+  ];
+
+  var kpiEl = document.getElementById('dash-kpis');
+  kpiEl.innerHTML = '';
+  kpis.forEach(function(k) {{
+    kpiEl.innerHTML +=
+      '<div class="kpi-card ' + k.cls + '">' +
+      '<div class="kpi-valor">' + k.valor + '</div>' +
+      '<div class="kpi-label">' + k.label + '</div>' +
+      (k.delta ? '<div class="kpi-delta">' + k.delta + '</div>' : '') +
+      '</div>';
+  }});
+
+  // ── Barra de progresso ───────────────────────────────────
+  var total = a.total;
+  var pct   = total > 0 ? Math.round((a.concluidas / total) * 100) : 0;
+  document.getElementById('dash-progress').style.width = pct + '%';
+  document.getElementById('dash-prog-pct').textContent = pct + '%';
+  document.getElementById('dash-prog-label-esq').textContent =
+    a.concluidas + ' de ' + total + ' atividades finalizadas';
+
+  // ── Comparativo ──────────────────────────────────────────
+  var compEl = document.getElementById('dash-comp');
+  compEl.innerHTML = '';
+
+  function _compCard(label, stats) {{
+    if (!stats) return '<div class="comp-card"><div class="comp-mes">' + label + '</div><div style="color:#aaa;font-size:12px;">Sem dados</div></div>';
+    return '<div class="comp-card">' +
+      '<div class="comp-mes">' + label + '</div>' +
+      '<div class="comp-row"><span>Concluídas</span><b>' + stats.concluidas + '</b></div>' +
+      '<div class="comp-row"><span>Improdutivas</span><b>' + stats.improdutivas + '</b></div>' +
+      '<div class="comp-row"><span>Canceladas</span><b>' + stats.canceladas + '</b></div>' +
+      '<div class="comp-row"><span>Total visitados</span><b>' + stats.total + '</b></div>' +
+      '<div class="comp-row"><span>Km percorridos</span><b>' + (stats.km_total || 0) + ' km</b></div>' +
+      '</div>';
+  }}
+
+  compEl.innerHTML = _compCard(d.label_atual, a) + _compCard(d.label_anterior || 'Mês anterior', ant);
+
+  // ── Deslocamentos ────────────────────────────────────────
+  function _deslLista(lista, elId, classRank) {{
+    var el = document.getElementById(elId);
+    el.innerHTML = '';
+    if (!lista || !lista.length) {{
+      el.innerHTML = '<div style="color:#aaa;font-size:12px;padding:8px">Sem dados suficientes</div>';
+      return;
+    }}
+    lista.forEach(function(d, i) {{
+      el.innerHTML +=
+        '<div class="desl-item">' +
+        '<div class="desl-rank ' + classRank + '">' + (i+1) + '</div>' +
+        '<div class="desl-rota"><b>' + d.de + '</b> → <b>' + d.para + '</b></div>' +
+        '<div class="desl-km ' + classRank + '">' + d.km + ' km</div>' +
+        '</div>';
+    }});
+  }}
+
+  _deslLista(a.top_maiores, 'dash-maiores', '');
+  _deslLista(a.top_menores, 'dash-menores', 'menor');
+}}
+</script>
+
 </body>
 </html>"""
 
@@ -3204,7 +4043,8 @@ def main():
     publicar_mapa_github(BASE_DIR / "MAPA_ROTAS.html")
 
     print("   → Atualizando Google Sheets...")
-    atualizar_sheets(ws, df_fixas, rota_final, sites_originais, df_aguardando)
+    atualizar_sheets(ws, df_fixas, rota_final, sites_originais, df_aguardando,
+                     historico_meses=historico_meses)
 
     # Mover arquivos processados
     if arquivos_novas:
