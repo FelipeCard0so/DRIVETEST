@@ -1725,28 +1725,89 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 /* ── Resultado busca global ─────────────────────── */
 #resultado-busca-global{{
   display:none;position:absolute;top:88px;right:330px;z-index:1002;
-  width:min(360px,calc(100vw - 24px));max-height:64vh;overflow:auto;
+  width:min(380px,calc(100vw - 24px));max-height:70vh;overflow:auto;
   background:rgba(255,255,255,.98);border-radius:10px;
   box-shadow:0 6px 24px rgba(0,0,0,.22);padding:12px 14px;
 }}
 #resultado-busca-global.visivel{{display:block;}}
-.bg-topo{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}}
+.bg-topo{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px;}}
 .bg-titulo{{font-size:13px;font-weight:700;color:#1a237e;}}
+.bg-subtitulo{{font-size:11px;color:#888;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid #e6e8ef;}}
 #btn-fechar-bg{{
   width:26px;height:26px;border:none;border-radius:6px;
   background:#eef1f7;color:#1a237e;font-weight:800;cursor:pointer;
 }}
-.bg-item{{
-  display:flex;align-items:center;justify-content:space-between;gap:10px;
-  border-top:1px solid #e6e8ef;padding:8px 0;font-size:12px;color:#333;
+
+/* ── Linha de mês (agrupamento) ─── */
+.bg-mes-row{{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  border-top:1px solid #e6e8ef;padding:9px 0 6px;
 }}
-.bg-item:first-child{{border-top:none;}}
-.bg-site{{font-weight:700;color:#1a237e;}}
+.bg-mes-row:first-child{{border-top:none;}}
+.bg-mes-info{{flex:1;min-width:0;}}
+.bg-mes-nome{{font-size:12px;font-weight:700;color:#1a237e;}}
+.bg-mes-badge{{
+  display:inline-block;margin-left:6px;font-size:10px;font-weight:700;
+  background:#e8f0ff;color:#1a237e;border-radius:10px;padding:1px 7px;
+}}
+.bg-mes-tipo{{font-size:11px;color:#888;margin-top:1px;}}
+
+/* ── Botão VER ─── */
 .bg-ver{{
   border:none;border-radius:6px;background:#1a237e;color:white;
-  font-size:11px;font-weight:700;padding:5px 8px;cursor:pointer;white-space:nowrap;
+  font-size:11px;font-weight:700;padding:6px 10px;cursor:pointer;white-space:nowrap;
 }}
 .bg-ver:hover{{background:#121858;}}
+
+/* ── Múltiplas visitas no mesmo mês (expansível) ─── */
+.bg-visitas{{
+  margin:4px 0 6px 12px;border-left:3px solid #e0e6ff;padding-left:10px;
+}}
+.bg-visita-item{{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:6px;padding:5px 0;border-bottom:1px dashed #eee;font-size:11px;
+}}
+.bg-visita-item:last-child{{border-bottom:none;}}
+.bg-visita-num{{color:#888;font-size:10px;min-width:18px;}}
+.bg-visita-info{{flex:1;color:#444;}}
+.bg-ver-sm{{
+  border:none;border-radius:5px;background:#eef2ff;color:#1a237e;
+  font-size:10px;font-weight:700;padding:4px 8px;cursor:pointer;white-space:nowrap;
+}}
+.bg-ver-sm:hover{{background:#c7d4ff;}}
+
+/* ── Popup de relatório inline ─── */
+.bg-relatorio{{
+  margin:4px 0 6px 12px;padding:10px 12px;
+  background:#f8f9ff;border-left:3px solid #2A52BE;border-radius:0 6px 6px 0;
+  font-size:11px;color:#333;line-height:1.6;display:none;
+}}
+.bg-relatorio.aberto{{display:block;}}
+.bg-rel-label{{font-weight:700;color:#1a237e;font-size:11px;margin-bottom:4px;}}
+.bg-rel-texto{{white-space:pre-wrap;word-break:break-word;color:#444;}}
+.bg-rel-tipo{{
+  display:inline-block;margin-top:6px;font-size:10px;font-weight:700;
+  padding:2px 8px;border-radius:10px;
+}}
+.bg-rel-conc{{background:#d4edda;color:#155724;}}
+.bg-rel-impr{{background:#f8d7da;color:#721c24;}}
+.bg-rel-canc{{background:#eceff1;color:#455a64;}}
+
+/* ── Site header ─── */
+.bg-site-header{{
+  display:flex;align-items:center;gap:8px;margin-bottom:8px;
+}}
+.bg-site{{font-weight:700;color:#1a237e;font-size:14px;}}
+.bg-total-badge{{
+  font-size:11px;font-weight:600;background:#1a237e;color:white;
+  border-radius:10px;padding:2px 9px;
+}}
+
+/* ── Ano separador ─── */
+.bg-ano-sep{{
+  font-size:10px;font-weight:700;color:#aaa;letter-spacing:1px;
+  text-transform:uppercase;padding:6px 0 2px;
+}}
 
 /* ── Ponto de partida (animado) ─────────────────── */
 .partida-pulse{{
@@ -2583,25 +2644,46 @@ function buscarSite() {{
   var chave = normBusca(document.getElementById('busca-site').value);
   if (!chave) {{ mostrarMsg('msg-busca', ''); return; }}
 
-  // 1) Mês atual
-  var item = indiceSites[chave];
-  if (item) {{
-    map.closeAllPopups ? map.closeAllPopups() : null;
-    map.flyTo({{center:[item.lon, item.lat], zoom: Math.max(map.getZoom(), 13), duration:900}});
-    setTimeout(function(){{ item.marker.togglePopup(); }}, 950);
-    mostrarMsg('msg-busca', '');
+  // Coletar ocorrências no mês atual
+  var ocsAtual = [];
+  var itemAtual = indiceSites[chave];
+
+  // Buscar também em FIXOS e ROTA para o mês atual
+  var todosAtual = [].concat(
+    FIXOS.map(function(p){{ return {{ponto:p, atual:true}}; }}),
+    ROTA.map(function(p){{ return {{ponto:p, atual:true}}; }})
+  );
+  todosAtual.forEach(function(entry) {{
+    var p = entry.ponto;
+    var k = normBusca(p.id);
+    if (k === chave || (k.length >= 3 && k.slice(-3) === chave)) {{
+      ocsAtual.push({{ano:'atual', mes:'atual', label:'Mês atual', ponto:p, atual:true}});
+    }}
+  }});
+
+  // Buscar histórico
+  var ocsHist = buscarSiteHistorico(chave);
+
+  var todas = [].concat(ocsAtual, ocsHist);
+
+  if (!todas.length) {{
+    mostrarMsg('msg-busca', 'Site não encontrado!');
     return;
   }}
 
-  // 2) Meses anteriores
-  var ocs = buscarSiteHistorico(chave);
-  if (ocs.length) {{
-    mostrarMsg('msg-busca', '');
-    mostrarBuscaGlobal(chave, ocs);
+  mostrarMsg('msg-busca', '');
+
+  // Se só tem no mês atual (1 ocorrência) → navegar direto + abre painel se histórico existe
+  if (ocsAtual.length === 1 && !ocsHist.length) {{
+    if (itemAtual) {{
+      map.flyTo({{center:[itemAtual.lon, itemAtual.lat], zoom:Math.max(map.getZoom(),13), duration:900}});
+      setTimeout(function(){{ itemAtual.marker.togglePopup(); }}, 950);
+    }}
     return;
   }}
 
-  mostrarMsg('msg-busca', 'Site não encontrado!');
+  // Caso geral: mostrar painel completo de visitas
+  mostrarBuscaGlobal(chave, todas);
 }}
 
 document.getElementById('busca-site').addEventListener('keydown', function(ev) {{
@@ -2613,7 +2695,7 @@ document.getElementById('busca-site').addEventListener('input', function() {{
 }});
 
 // ══════════════════════════════════════════════════════════════
-// BUSCA GLOBAL (meses anteriores)
+// BUSCA GLOBAL — histório completo de visitas ao site
 // ══════════════════════════════════════════════════════════════
 function buscarSiteHistorico(chave) {{
   var achados = [];
@@ -2623,7 +2705,7 @@ function buscarSiteHistorico(chave) {{
       (pac.pontos||[]).forEach(function(p) {{
         var k = normBusca(p.id);
         if (k === chave || (k.length >= 3 && k.slice(-3) === chave)) {{
-          achados.push({{ano:ano, mes:mes, label:pac.label, ponto:p}});
+          achados.push({{ano:ano, mes:mes, label:pac.label, ponto:p, atual:false}});
         }}
       }});
     }});
@@ -2635,26 +2717,232 @@ function fecharBuscaGlobal() {{
   document.getElementById('resultado-busca-global').classList.remove('visivel');
 }}
 
-function mostrarBuscaGlobal(chave, ocs) {{
-  ocorrenciasBG = ocs;
-  var titulo = document.getElementById('bg-titulo');
+function _tipoLabel(tipo) {{
+  if (!tipo) return '';
+  if (tipo === 'concluida') return '<span class="bg-rel-tipo bg-rel-conc">✓ Concluída</span>';
+  if (tipo === 'cancelada')  return '<span class="bg-rel-tipo bg-rel-canc">⊘ Cancelada</span>';
+  return '<span class="bg-rel-tipo bg-rel-impr">✗ Improdutiva</span>';
+}}
+
+function mostrarBuscaGlobal(chave, todas) {{
+  ocorrenciasBG = todas;
   var lista = document.getElementById('bg-lista');
-  titulo.textContent = 'Site "' + document.getElementById('busca-site').value.toUpperCase() + '" encontrado em:';
+  var siteId = document.getElementById('busca-site').value.toUpperCase() || todas[0].ponto.id;
+
+  document.getElementById('bg-titulo').textContent = siteId;
   lista.innerHTML = '';
-  ocs.forEach(function(oc, idx) {{
-    var row = document.createElement('div');
-    row.className = 'bg-item';
-    var txt = document.createElement('div');
-    txt.innerHTML = '<span class="bg-site">' + oc.ponto.id + '</span> — ' + oc.label;
-    var btn = document.createElement('button');
-    btn.className = 'bg-ver';
-    btn.textContent = 'ver';
-    btn.onclick = (function(i){{ return function(){{ abrirOcBG(i); }}; }})(idx);
-    row.appendChild(txt);
-    row.appendChild(btn);
-    lista.appendChild(row);
+
+  // Cabeçalho: total de visitas
+  var totalDiv = document.createElement('div');
+  totalDiv.className = 'bg-subtitulo';
+  totalDiv.innerHTML = '<b>' + todas.length + '</b> visita' + (todas.length > 1 ? 's' : '') + ' registrada' + (todas.length > 1 ? 's' : '');
+  lista.appendChild(totalDiv);
+
+  // ── Agrupar por ano/mês ─────────────────────────────────────
+  // Estrutura: grupos por chave ano/mes com label e lista de itens
+  var grupos = {{}};
+  var ordemGrupos = [];
+
+  todas.forEach(function(oc) {{
+    var chaveGrupo = oc.atual ? 'atual' : (oc.ano + '/' + oc.mes);
+    if (!grupos[chaveGrupo]) {{
+      grupos[chaveGrupo] = {{ label: oc.label, ano: oc.ano, mes: oc.mes, atual: oc.atual, itens: [] }};
+      ordemGrupos.push(chaveGrupo);
+    }}
+    grupos[chaveGrupo].itens.push(oc);
   }});
+
+  var anoAnterior = null;
+
+  ordemGrupos.forEach(function(chaveGrupo) {{
+    var grupo = grupos[chaveGrupo];
+    var itens = grupo.itens;
+    var ano = grupo.atual ? 'Mês atual' : grupo.ano;
+
+    // Separador de ano
+    if (!grupo.atual && ano !== anoAnterior) {{
+      var anoDiv = document.createElement('div');
+      anoDiv.className = 'bg-ano-sep';
+      anoDiv.textContent = ano;
+      lista.appendChild(anoDiv);
+      anoAnterior = ano;
+    }} else if (grupo.atual) {{
+      anoAnterior = null;
+    }}
+
+    // ── Linha do mês ──────────────────────────────────────────
+    var mesRow = document.createElement('div');
+    mesRow.className = 'bg-mes-row';
+
+    var mesInfo = document.createElement('div');
+    mesInfo.className = 'bg-mes-info';
+
+    // Nome do mês + badge de contagem se > 1
+    var mesNome = document.createElement('div');
+    mesNome.className = 'bg-mes-nome';
+    var labelMes = grupo.atual ? 'Mês atual' : grupo.label.split('/')[0];
+    mesNome.innerHTML = labelMes;
+    if (itens.length > 1) {{
+      mesNome.innerHTML += ' <span class="bg-mes-badge">' + itens.length + ' visitas</span>';
+    }}
+    mesInfo.appendChild(mesNome);
+
+    // Tipo da(s) visita(s) se único
+    if (itens.length === 1 && itens[0].ponto.tipo) {{
+      var tipoDiv = document.createElement('div');
+      tipoDiv.className = 'bg-mes-tipo';
+      tipoDiv.innerHTML = itens[0].ponto.tipo === 'concluida' ? '✓ Concluída'
+                        : itens[0].ponto.tipo === 'cancelada'  ? '⊘ Cancelada'
+                        : '✗ Improdutiva';
+      mesInfo.appendChild(tipoDiv);
+    }}
+
+    mesRow.appendChild(mesInfo);
+
+    // ── Botão VER ────────────────────────────────────────────
+    // 1 visita: VER navega diretamente + abre popup de relatório
+    // N visitas: VER expande lista de sub-visitas
+    var relDiv = document.createElement('div');
+    relDiv.className = 'bg-relatorio';
+    var idRel = 'rel-' + chaveGrupo.replace(/[^a-z0-9]/gi, '-');
+    relDiv.id = idRel;
+
+    var btnVer = document.createElement('button');
+    btnVer.className = 'bg-ver';
+    btnVer.textContent = 'ver';
+
+    if (itens.length === 1) {{
+      // Uma visita — ver navega para o mapa e mostra relatório
+      (function(item, rel) {{
+        btnVer.onclick = function() {{
+          toggleRelatorio(rel, item);
+          if (!item.atual) {{
+            document.getElementById('sel-ano-ant').value = item.ano;
+            preencherMeses();
+            document.getElementById('sel-mes-ant').value = item.mes;
+            mostrarAba('anteriores');
+            mostrarMesAnterior(item.ano, item.mes, normBusca(item.ponto.id));
+          }} else {{
+            var idx = indiceSites[normBusca(item.ponto.id)];
+            if (idx) {{
+              map.flyTo({{center:[idx.lon, idx.lat], zoom:13, duration:700}});
+              setTimeout(function(){{ idx.marker.togglePopup(); }}, 750);
+            }}
+          }}
+        }};
+      }})(itens[0], relDiv);
+
+      // Conteúdo do relatório
+      _preencherRelatorio(relDiv, itens[0].ponto);
+
+    }} else {{
+      // Múltiplas visitas — ver expande lista de sub-visitas
+      var subDiv = document.createElement('div');
+      subDiv.className = 'bg-visitas';
+      subDiv.style.display = 'none';
+      var subId = 'sub-' + chaveGrupo.replace(/[^a-z0-9]/gi, '-');
+      subDiv.id = subId;
+
+      itens.forEach(function(item, idx) {{
+        var subRow = document.createElement('div');
+        subRow.className = 'bg-visita-item';
+
+        var numSpan = document.createElement('span');
+        numSpan.className = 'bg-visita-num';
+        numSpan.textContent = (idx + 1) + 'ª';
+
+        var infoSpan = document.createElement('span');
+        infoSpan.className = 'bg-visita-info';
+        var tipoTxt = item.ponto.tipo === 'concluida' ? '✓ Concluída'
+                    : item.ponto.tipo === 'cancelada'  ? '⊘ Cancelada'
+                    : item.ponto.tipo ? '✗ Improdutiva' : 'Pendente';
+        infoSpan.textContent = tipoTxt;
+        if (item.ponto.concluido && item.ponto.concluido !== '.') {{
+          infoSpan.textContent += ' · ' + item.ponto.concluido.substring(0, 30) + (item.ponto.concluido.length > 30 ? '…' : '');
+        }}
+
+        var btnSub = document.createElement('button');
+        btnSub.className = 'bg-ver-sm';
+        btnSub.textContent = 'ver';
+
+        // Relatório individual para cada sub-visita
+        var subRelDiv = document.createElement('div');
+        subRelDiv.className = 'bg-relatorio';
+        var subRelId = 'rel-' + chaveGrupo.replace(/[^a-z0-9]/gi,'-') + '-' + idx;
+        subRelDiv.id = subRelId;
+        _preencherRelatorio(subRelDiv, item.ponto);
+
+        (function(it, rel) {{
+          btnSub.onclick = function() {{
+            toggleRelatorio(rel, it);
+            if (!it.atual) {{
+              document.getElementById('sel-ano-ant').value = it.ano;
+              preencherMeses();
+              document.getElementById('sel-mes-ant').value = it.mes;
+              mostrarAba('anteriores');
+              mostrarMesAnterior(it.ano, it.mes, normBusca(it.ponto.id));
+            }}
+          }};
+        }})(item, subRelDiv);
+
+        subRow.appendChild(numSpan);
+        subRow.appendChild(infoSpan);
+        subRow.appendChild(btnSub);
+        subDiv.appendChild(subRow);
+        subDiv.appendChild(subRelDiv);
+      }});
+
+      (function(sub) {{
+        btnVer.onclick = function() {{
+          var aberto = sub.style.display !== 'none';
+          sub.style.display = aberto ? 'none' : 'block';
+          btnVer.textContent = aberto ? 'ver' : 'fechar';
+        }};
+      }})(subDiv);
+
+      // Inserir subDiv logo após o mesRow
+      mesRow.appendChild(btnVer);
+      lista.appendChild(mesRow);
+      lista.appendChild(subDiv);
+      return;  // pular o appendChild abaixo
+    }}
+
+    mesRow.appendChild(btnVer);
+    lista.appendChild(mesRow);
+    lista.appendChild(relDiv);
+  }});
+
   document.getElementById('resultado-busca-global').classList.add('visivel');
+}}
+
+function _preencherRelatorio(div, ponto) {{
+  var conteudo = '';
+
+  if (ponto.concluido && ponto.concluido !== '.' && ponto.concluido.trim()) {{
+    conteudo += '<div class="bg-rel-label">📋 Relatório:</div>';
+    conteudo += '<div class="bg-rel-texto">' + ponto.concluido.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+  }} else {{
+    conteudo += '<div class="bg-rel-texto" style="color:#aaa;font-style:italic;">Sem observações registradas</div>';
+  }}
+
+  if (ponto.hotel && ponto.hotel !== '.') {{
+    conteudo += '<div style="margin-top:6px;font-size:11px;color:#e67e22;">🏨 ' + ponto.hotel + '</div>';
+  }}
+
+  conteudo += _tipoLabel(ponto.tipo || '');
+
+  div.innerHTML = conteudo;
+}}
+
+function toggleRelatorio(div, item) {{
+  var estaAberto = div.classList.contains('aberto');
+  // Fechar todos os outros abertos
+  document.querySelectorAll('.bg-relatorio.aberto').forEach(function(el) {{
+    el.classList.remove('aberto');
+  }});
+  if (!estaAberto) {{
+    div.classList.add('aberto');
+  }}
 }}
 
 function abrirOcBG(idx) {{
