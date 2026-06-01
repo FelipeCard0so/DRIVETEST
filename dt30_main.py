@@ -38,7 +38,8 @@ GITHUB_TOKEN_PATH  = BASE_DIR / "github_token.txt"
 HOTEIS_PATH        = BASE_DIR / "HOTEIS.xlsx"
 HOTEIS_SHEET_ID    = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
 HOTEIS_GID         = 965678690
-MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"   # ← NOVO
+MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"
+CONTROLE_KM_ID     = "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k"  # Controle Diário de Atividades
 
 # Status da planilha
 ST_CONCLUIDO    = "✓ Atividade concluída"
@@ -891,7 +892,56 @@ def ler_atividades_sheets(ws):
     return pd.DataFrame(registros)
 
 
-def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None):
+def verificar_historico_site(site, historico_meses):
+    """
+    Verifica se o site já foi visitado em meses anteriores.
+    Retorna lista de visitas anteriores ordenadas da mais recente para a mais antiga.
+    Cada item: {"label": "Março/2026", "tipo": "improdutiva", "concluido": "..."}
+    """
+    site_norm = remove_acentos(str(site).strip().upper())
+    visitas = []
+
+    for ano, meses in sorted(historico_meses.items(), reverse=True):
+        for mes, pac in sorted(meses.items(), key=lambda x: int(x[0]), reverse=True):
+            for ponto in pac.get("pontos", []):
+                ponto_norm = remove_acentos(str(ponto.get("id", "")).strip().upper())
+                if ponto_norm == site_norm:
+                    visitas.append({
+                        "label":     pac["label"],
+                        "tipo":      ponto.get("tipo", ""),
+                        "concluido": ponto.get("concluido", ""),
+                    })
+
+    return visitas
+
+
+def montar_alerta_historico(site, visitas):
+    """
+    Monta string de alerta para coluna CONCLUIDO.
+    Ex:
+        ⚠️ Já visitado:
+        • Março/2026 — improdutivo
+        • Janeiro/2026 — concluído
+    """
+    if not visitas:
+        return ""
+
+    tipo_label = {
+        "concluida":   "concluído",
+        "improdutiva": "improdutivo",
+        "cancelada":   "cancelado",
+    }
+
+    linhas = [f"⚠️ {site} já visitado:"]
+    for v in visitas:
+        tipo = tipo_label.get(v["tipo"], v["tipo"])
+        obs  = f" · {v['concluido'][:40]}" if v["concluido"] and v["concluido"] not in (".", "") else ""
+        linhas.append(f"• {v['label']} — {tipo}{obs}")
+
+    return "\n".join(linhas)
+
+
+def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None, historico_meses=None):
     print("   Montando linhas...")
 
     def _coord(v):
@@ -900,8 +950,9 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
         except Exception:
             return str(v) if v else ""
 
-    def formatar_linha(row_dict, status_override=None):
+    def formatar_linha(row_dict, status_override=None, concluido_override=None):
         status = status_override if status_override is not None else row_dict.get("STATUS", "")
+        concluido = concluido_override if concluido_override is not None else str(row_dict.get("CONCLUIDO", "") or "")
         return [
             str(row_dict.get("DEMANDA",    "")),
             str(row_dict.get("INTEGRAÇÃO", "")),
@@ -914,7 +965,7 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
             str(row_dict.get("2G|3G|4G",   "")),
             str(row_dict.get("5G",         "")),
             str(status),
-            str(row_dict.get("CONCLUIDO",  "") or ""),
+            concluido,
             str(row_dict.get("HOTEL",      "") or ""),
         ]
 
@@ -925,16 +976,26 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None)
 
     for _, row in df_rota.iterrows():
         row_d = row.to_dict()
-        site = str(row_d.get("SITE", "")).upper()
+        site  = str(row_d.get("SITE", "")).upper()
 
         if site in sites_originais:
             status = row_d.get("STATUS", "")
             if status == ST_NOVA:
                 status = ""
+            concluido_override = None  # já existia — não sobreescrever CONCLUIDO
         else:
             status = ST_NOVA
+            # ── Nova atividade: verificar histórico e gerar alerta ────────
+            concluido_override = None
+            if historico_meses:
+                visitas = verificar_historico_site(site, historico_meses)
+                if visitas:
+                    alerta = montar_alerta_historico(site, visitas)
+                    concluido_override = alerta
+                    print(f"   ⚠️  {site}: visitado {len(visitas)}x anteriormente — alerta gravado.")
 
-        todas_linhas.append(formatar_linha(row_d, status_override=status))
+        todas_linhas.append(formatar_linha(row_d, status_override=status,
+                                           concluido_override=concluido_override))
 
     if df_aguardando is not None and not df_aguardando.empty:
         todas_linhas.append([""] * 13)
@@ -1493,7 +1554,95 @@ def carregar_hoteis():
 # GERAÇÃO DE MAPA — MAPBOX GL JS
 # ============================================================
 
-def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None,
+def ler_km_hodometro(client):
+    """
+    Lê o km total do mês vigente da planilha 'Controle Diário de Atividades'.
+    Busca a aba do mês atual (padrão: 'MAIO - 26'), localiza o total
+    da coluna DESLOCAMENTO (última linha com valor numérico nessa coluna).
+    Retorna float com o km total, ou None se não encontrar.
+    """
+    meses_pt = [
+        "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
+        "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+    ]
+    now = datetime.now()
+    # Padrão da aba: "MAIO - 26"
+    nome_aba = f"{meses_pt[now.month - 1]} - {str(now.year)[-2:]}"
+
+    try:
+        sh = client.open_by_key(CONTROLE_KM_ID)
+    except Exception as e:
+        print(f"   ⚠️  Controle KM: não foi possível abrir a planilha — {e}")
+        return None
+
+    # Tentar encontrar a aba do mês
+    ws_km = None
+    for ws in sh.worksheets():
+        titulo_norm = remove_acentos(ws.title.strip().upper())
+        alvo_norm   = remove_acentos(nome_aba.upper())
+        if titulo_norm == alvo_norm:
+            ws_km = ws
+            break
+
+    if ws_km is None:
+        print(f"   ⚠️  Controle KM: aba '{nome_aba}' não encontrada.")
+        return None
+
+    try:
+        dados = ws_km.get_all_values()
+    except Exception as e:
+        print(f"   ⚠️  Controle KM: erro ao ler aba — {e}")
+        return None
+
+    if not dados:
+        return None
+
+    # Identificar coluna DESLOCAMENTO pelo cabeçalho
+    cabecalho = None
+    col_desl = None
+    for i, linha in enumerate(dados):
+        for j, cel in enumerate(linha):
+            cel_norm = remove_acentos(str(cel).strip().upper())
+            if "DESLOCAMENTO" in cel_norm:
+                cabecalho = i
+                col_desl  = j
+                break
+        if col_desl is not None:
+            break
+
+    if col_desl is None:
+        print("   ⚠️  Controle KM: coluna DESLOCAMENTO não encontrada.")
+        return None
+
+    # Percorrer a coluna de baixo para cima buscando o total
+    # O total é o último valor numérico significativo (geralmente na linha de totais)
+    km_total = None
+    for linha in reversed(dados[cabecalho + 1:]):
+        if col_desl >= len(linha):
+            continue
+        cel = str(linha[col_desl]).strip()
+        if not cel:
+            continue
+        # Limpar "KM", espaços, pontos de milhar, vírgula decimal
+        cel_num = re.sub(r'[^\d.,]', '', cel).replace('.', '').replace(',', '.')
+        try:
+            valor = float(cel_num)
+            if valor > 0:
+                km_total = valor
+                break
+        except ValueError:
+            continue
+
+    if km_total is not None:
+        print(f"   ✅ Controle KM ({nome_aba}): {km_total:.0f} km reais lidos do hodômetro.")
+    else:
+        print(f"   ⚠️  Controle KM: nenhum valor encontrado na coluna DESLOCAMENTO.")
+
+    return km_total
+
+
+def gerar_mapa(
+df_rota, lat0, lon0, cidade0, df_fixas=None,
                df_aguardando=None, historico_meses=None, mapbox_token=None):
     """
     Gera MAPA_ROTAS.html com Mapbox GL JS.
@@ -1608,6 +1757,242 @@ def gerar_mapa(df_rota, lat0, lon0, cidade0, df_fixas=None,
         print("   ℹ️  Sem atividades pendentes — rota vazia")
 
     j_rota_real = json.dumps(rota_real_data, ensure_ascii=False)
+
+    # ── Calcular estatísticas para o Dashboard ───────────────────────────
+    def _stats_de_pontos(pontos_fixos_lista, pontos_rota_lista, pontos_aguard_lista):
+        """Calcula estatísticas de um conjunto de atividades."""
+        concluidas   = [p for p in pontos_fixos_lista if p.get("tipo") == "concluida"]
+        improdutivas = [p for p in pontos_fixos_lista if p.get("tipo") == "improdutiva"]
+        canceladas   = [p for p in pontos_fixos_lista if p.get("tipo") == "cancelada"]
+        pendentes    = pontos_rota_lista
+        aguardando   = pontos_aguard_lista
+
+        return {
+            "concluidas":   len(concluidas),
+            "improdutivas": len(improdutivas),
+            "canceladas":   len(canceladas),
+            "pendentes":    len(pendentes),
+            "aguardando":   len(aguardando),
+            "total":        len(concluidas) + len(improdutivas) + len(canceladas),
+            "km_total":     0.0,   # será preenchido pelo hodômetro real
+            "top_maiores":  [],    # será preenchido pela planilha de controle
+            "top_menores":  [],    # será preenchido pela planilha de controle
+        }
+
+    def _ler_deslocamentos_controle(client_km):
+        """
+        Lê os deslocamentos diários da planilha Controle Diário de Atividades.
+        Para cada linha com km > 0:
+          - Cidade de chegada  = coluna LOCAL da linha atual
+          - Cidade de saída    = coluna LOCAL da linha anterior com cidade preenchida
+            (se for o primeiro dia do mês, busca a última cidade do mês anterior)
+        Retorna lista de dicts:
+          {"de": "Cidade A", "para": "Cidade B", "km": 620.0}
+        ordenada pela data (ordem das linhas).
+        """
+        meses_pt_ctrl = [
+            "JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
+            "JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO",
+        ]
+        now = datetime.now()
+        nome_aba_atual  = f"{meses_pt_ctrl[now.month - 1]} - {str(now.year)[-2:]}"
+        # Aba do mês anterior
+        mes_ant_idx = now.month - 2  # 0-based
+        ano_ant     = now.year if now.month > 1 else now.year - 1
+        mes_ant_idx = mes_ant_idx % 12
+        nome_aba_ant = f"{meses_pt_ctrl[mes_ant_idx]} - {str(ano_ant)[-2:]}"
+
+        try:
+            sh = client_km.open_by_key(CONTROLE_KM_ID)
+        except Exception as e:
+            print(f"   ⚠️  Deslocamentos: não foi possível abrir planilha — {e}")
+            return []
+
+        def _buscar_aba(nome):
+            for ws in sh.worksheets():
+                if remove_acentos(ws.title.strip().upper()) == remove_acentos(nome.upper()):
+                    return ws
+            return None
+
+        def _detectar_colunas(dados):
+            """Retorna (cabecalho_idx, col_dia, col_desl, col_local) ou None."""
+            for i, linha in enumerate(dados):
+                ln = [remove_acentos(str(c).strip().upper()) for c in linha]
+                if "DIA" in ln and "DESLOCAMENTO" in ln:
+                    col_dia    = next((j for j, c in enumerate(ln) if c == "DIA"), None)
+                    col_desl   = next((j for j, c in enumerate(ln) if "DESLOCAMENTO" in c), None)
+                    # CIDADES é a última coluna com cabeçalho — prioridade: "CIDADE" sozinho
+                    # ou "CIDADES", nunca "HORA TRABALHADA"
+                    col_local  = None
+                    for j, c in enumerate(ln):
+                        if ("CIDADE" in c or c == "LOCAL") and "HORA" not in c and "TRAB" not in c:
+                            col_local = j  # pega a última ocorrência (mais à direita)
+                    col_inicio  = next((j for j, c in enumerate(ln)
+                                        if "INICIO" in c or "INICIO" in c), None)
+                    col_termino = next((j for j, c in enumerate(ln)
+                                        if "TERMINO" in c or "TERMINO" in c or "TERM" in c), None)
+                    return i, col_dia, col_desl, col_local, col_inicio, col_termino
+            return None, None, None, None, None, None
+
+        def _linhas_validas(dados, cab, col_dia, col_desl, col_local, col_inicio, col_termino):
+            """
+            Retorna lista de dicts com todos os dias da aba:
+              {"dia_num": str, "cidade": str, "km": float, "inicio": str, "termino": str}
+            km=0 para dias sem deslocamento (útil para rastrear cidade de saída).
+            """
+            linhas = []
+            for linha in dados[cab + 1:]:
+                dia_val = str(linha[col_dia]).strip() if col_dia is not None and col_dia < len(linha) else ""
+                if not dia_val or not dia_val.isdigit():
+                    continue
+
+                cidade = ""
+                if col_local is not None and col_local < len(linha):
+                    cidade = str(linha[col_local]).strip()
+
+                inicio = ""
+                if col_inicio is not None and col_inicio < len(linha):
+                    inicio = str(linha[col_inicio]).strip()
+
+                termino = ""
+                if col_termino is not None and col_termino < len(linha):
+                    termino = str(linha[col_termino]).strip()
+
+                km = 0.0
+                if col_desl is not None and col_desl < len(linha):
+                    cel = str(linha[col_desl]).strip()
+                    cel_num = re.sub(r'[^\d.,]', '', cel).replace('.', '').replace(',', '.')
+                    try:
+                        km = float(cel_num)
+                    except ValueError:
+                        km = 0.0
+
+                linhas.append({
+                    "dia_num": dia_val,
+                    "cidade":  cidade,
+                    "km":      km,
+                    "inicio":  inicio,
+                    "termino": termino,
+                })
+            return linhas
+
+        # ── Ler aba atual ────────────────────────────────────────────────
+        ws_atual = _buscar_aba(nome_aba_atual)
+        if ws_atual is None:
+            return []
+        try:
+            dados_atual = ws_atual.get_all_values()
+        except Exception:
+            return []
+
+        cab, col_dia, col_desl, col_local, col_inicio, col_termino = _detectar_colunas(dados_atual)
+        if cab is None:
+            return []
+
+        linhas_atual = _linhas_validas(dados_atual, cab, col_dia, col_desl, col_local, col_inicio, col_termino)
+
+        # ── Última cidade do mês anterior (fallback para 1º dia) ─────────
+        ultima_cidade_ant = ""
+        ws_ant = _buscar_aba(nome_aba_ant)
+        if ws_ant:
+            try:
+                dados_ant = ws_ant.get_all_values()
+                cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a, col_ter_a = _detectar_colunas(dados_ant)
+                if cab_a is not None:
+                    linhas_ant = _linhas_validas(dados_ant, cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a, col_ter_a)
+                    # Última cidade preenchida do mês anterior
+                    for l in reversed(linhas_ant):
+                        if l["cidade"]:
+                            ultima_cidade_ant = l["cidade"]
+                            break
+            except Exception:
+                pass
+
+        # ── Montar pares saída → chegada ─────────────────────────────────
+        # Para cada linha com km > 0, a cidade de saída é a última cidade
+        # preenchida ANTES dessa linha (podendo ser do mês anterior).
+        deslocamentos = []
+        ultima_cidade = ultima_cidade_ant  # começa com fallback do mês anterior
+
+        for linha in linhas_atual:
+            cidade_chegada = linha["cidade"]
+            km = linha["km"]
+
+            if km > 0 and cidade_chegada:
+                cidade_saida = ultima_cidade if ultima_cidade else "—"
+                deslocamentos.append({
+                    "de":      cidade_saida,
+                    "para":    cidade_chegada,
+                    "km":      round(km, 1),
+                    "inicio":  linha.get("inicio", ""),
+                    "termino": linha.get("termino", ""),
+                })
+
+            # Atualizar última cidade conhecida
+            if cidade_chegada:
+                ultima_cidade = cidade_chegada
+
+        return deslocamentos
+
+    # Stats mês atual
+    stats_atual = _stats_de_pontos(pontos_fixos, pontos_rota, pontos_aguard)
+
+    # Stats mês anterior (último mês no histórico)
+    stats_anterior = None
+    label_anterior = ""
+    if historico_meses:
+        anos_ord = sorted(historico_meses.keys(), reverse=True)
+        for ano_k in anos_ord:
+            meses_ord = sorted(historico_meses[ano_k].keys(),
+                               key=lambda x: int(x), reverse=True)
+            if meses_ord:
+                mes_k = meses_ord[0]
+                pac_ant = historico_meses[ano_k][mes_k]
+                label_anterior = pac_ant.get("label", "")
+                pontos_ant = pac_ant.get("pontos", [])
+                fixos_ant  = [p for p in pontos_ant if p.get("tipo") in
+                              ("concluida", "improdutiva", "cancelada")]
+                stats_anterior = _stats_de_pontos(fixos_ant, [], [])
+                break
+
+    # Mês atual label
+    meses_pt = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+                "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
+    from datetime import datetime as _dt
+    now = _dt.now()
+    label_atual = f"{meses_pt[now.month-1]}/{now.year}"
+
+    # ── Km real do hodômetro (Controle Diário de Atividades) ─────────────
+    # Substitui o km estimado por linha reta pelo valor real do hodômetro
+    km_real = None
+    deslocamentos_reais = []
+    try:
+        _client_km = conectar_sheets()
+        km_real = ler_km_hodometro(_client_km)
+        deslocamentos_reais = _ler_deslocamentos_controle(_client_km)
+    except Exception as _e:
+        print(f"   ⚠️  Controle KM: erro na conexão — {_e}")
+
+    if km_real is not None:
+        stats_atual["km_total"] = round(km_real, 1)
+        stats_atual["km_fonte"] = "hodômetro"
+    else:
+        stats_atual["km_fonte"] = "estimado"
+
+    # Top 5 maiores e menores deslocamentos diários reais
+    if deslocamentos_reais:
+        desl_ord = sorted(deslocamentos_reais, key=lambda x: x["km"], reverse=True)
+        stats_atual["top_maiores"] = desl_ord[:5]
+        stats_atual["top_menores"] = sorted(deslocamentos_reais, key=lambda x: x["km"])[:5]
+        print(f"   ✅ {len(deslocamentos_reais)} deslocamentos diários lidos para o dashboard.")
+
+    dash_data = {
+        "label_atual":    label_atual,
+        "label_anterior": label_anterior,
+        "atual":          stats_atual,
+        "anterior":       stats_anterior,
+    }
+    j_dash = json.dumps(dash_data, ensure_ascii=False)
 
     # ── Token Mapbox: salvo em arquivo JS separado (fora do HTML) ──
     # O HTML carrega mapbox_config.js que NÃO vai para o GitHub.
@@ -1924,6 +2309,121 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
   body.painel-aberto #painel-toggle{{display:none;}}
   #resultado-busca-global{{right:52px;top:92px;width:calc(100vw - 68px);max-height:56vh;}}
 }}
+/* ── Dashboard modal ─────────────────────────────────────── */
+#dash-overlay{{
+  display:none;position:fixed;inset:0;z-index:4000;
+  background:rgba(1,38,25,.72);backdrop-filter:blur(3px);
+  align-items:center;justify-content:center;padding:16px;
+}}
+#dash-overlay.visivel{{display:flex;}}
+#dash-box{{
+  background:#F4F4E7;border-radius:16px;width:100%;max-width:680px;
+  max-height:90vh;overflow-y:auto;box-shadow:0 12px 48px rgba(0,0,0,.35);
+  animation:dashIn .28s ease-out;
+}}
+@keyframes dashIn{{
+  from{{transform:translateY(24px);opacity:0;}}
+  to{{transform:translateY(0);opacity:1;}}
+}}
+.dash-header{{
+  background:linear-gradient(135deg,#012619,#0B873D);
+  border-radius:16px 16px 0 0;padding:20px 24px 16px;
+  display:flex;align-items:center;justify-content:space-between;
+}}
+.dash-header h2{{margin:0;color:#A9D9C2;font-size:17px;letter-spacing:.4px;}}
+.dash-header span{{color:#78BF9E;font-size:12px;margin-top:2px;display:block;}}
+#btn-fechar-dash{{
+  background:rgba(255,255,255,.12);border:none;color:#E8E5DE;
+  width:32px;height:32px;border-radius:8px;font-size:18px;
+  cursor:pointer;font-weight:700;
+}}
+#btn-fechar-dash:hover{{background:rgba(255,255,255,.22);}}
+
+.dash-body{{padding:20px 20px 24px;}}
+
+/* ── KPI Cards ─── */
+.dash-kpi-grid{{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;
+}}
+.kpi-card{{
+  background:#fff;border-radius:12px;padding:14px 12px;text-align:center;
+  box-shadow:0 2px 8px rgba(0,0,0,.07);
+}}
+.kpi-valor{{font-size:28px;font-weight:800;line-height:1;}}
+.kpi-label{{font-size:10px;font-weight:600;color:#888;letter-spacing:.5px;
+  text-transform:uppercase;margin-top:4px;}}
+.kpi-delta{{font-size:10px;font-weight:600;margin-top:4px;}}
+.delta-up{{color:#0B873D;}} .delta-down{{color:#F24141;}} .delta-eq{{color:#888;}}
+
+.kc-conc{{border-top:3px solid #0B873D;}} .kc-conc .kpi-valor{{color:#0B873D;}}
+.kc-impr{{border-top:3px solid #F24141;}} .kc-impr .kpi-valor{{color:#F24141;}}
+.kc-pend{{border-top:3px solid #FFB400;}} .kc-pend .kpi-valor{{color:#FFB400;}}
+.kc-km  {{border-top:3px solid #0468BF;}} .kc-km .kpi-valor{{color:#0468BF;font-size:22px;}}
+.kc-canc{{border-top:3px solid #CAC8AF;}} .kc-canc .kpi-valor{{color:#888;}}
+.kc-aguard{{border-top:3px solid #78B593;}} .kc-aguard .kpi-valor{{color:#78B593;}}
+
+/* ── Barra de progresso ─── */
+.dash-section{{margin-bottom:18px;}}
+.dash-section-title{{
+  font-size:11px;font-weight:700;color:#012619;letter-spacing:.7px;
+  text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px;
+}}
+.progress-bar-bg{{
+  background:#E8E5DE;border-radius:99px;height:10px;overflow:hidden;
+}}
+.progress-bar-fill{{
+  height:100%;border-radius:99px;
+  background:linear-gradient(90deg,#0B873D,#4EA664);
+  transition:width .6s ease;
+}}
+.progress-label{{
+  display:flex;justify-content:space-between;font-size:11px;
+  color:#888;margin-top:4px;
+}}
+
+/* ── Comparativo ─── */
+.dash-comp-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+.comp-card{{
+  background:#fff;border-radius:10px;padding:12px 14px;
+  box-shadow:0 2px 6px rgba(0,0,0,.06);
+}}
+.comp-mes{{font-size:11px;font-weight:700;color:#012619;margin-bottom:8px;}}
+.comp-row{{display:flex;justify-content:space-between;font-size:12px;
+  color:#555;padding:3px 0;border-bottom:1px solid #f0f0f0;}}
+.comp-row:last-child{{border-bottom:none;}}
+.comp-row b{{color:#012619;}}
+
+/* ── Deslocamentos ─── */
+.desl-lista{{display:flex;flex-direction:column;gap:6px;}}
+.desl-item{{
+  display:flex;align-items:center;gap:8px;background:#fff;
+  border-radius:8px;padding:9px 12px;box-shadow:0 1px 4px rgba(0,0,0,.06);
+}}
+.desl-rank{{
+  font-size:11px;font-weight:800;color:#fff;background:#0468BF;
+  width:20px;height:20px;border-radius:50%;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;
+}}
+.desl-rank.menor{{background:#78B593;}}
+.desl-rota{{flex:1;font-size:11px;color:#444;}}
+.desl-rota b{{color:#012619;}}
+.desl-km{{font-size:12px;font-weight:700;color:#0468BF;white-space:nowrap;}}
+.desl-km.menor{{color:#78B593;}}
+
+/* ── Tabs internos dashboard ─── */
+.dash-tabs{{display:flex;gap:6px;margin-bottom:14px;}}
+.dash-tab{{
+  padding:6px 14px;border:none;border-radius:6px;font-size:12px;
+  font-weight:700;cursor:pointer;background:#E8E5DE;color:#012619;
+}}
+.dash-tab.ativo{{background:#012619;color:#A9D9C2;}}
+.dash-tab-panel{{display:none;}}
+.dash-tab-panel.ativo{{display:block;}}
+
+@media(max-width:500px){{
+  .dash-kpi-grid{{grid-template-columns:repeat(2,1fr);}}
+  .dash-comp-grid{{grid-template-columns:1fr;}}
+}}
 </style>
 </head>
 <body>
@@ -1951,6 +2451,14 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 
 <div id="painel">
   <h4>DT 3.0 — Rota</h4>
+
+  <!-- Botão Dashboard -->
+  <button onclick="abrirDashboard()" style="
+    width:100%;margin-bottom:10px;padding:8px;border:none;border-radius:8px;
+    background:linear-gradient(135deg,#0468BF,#2B96D9);color:white;
+    font-size:12px;font-weight:700;cursor:pointer;letter-spacing:.4px;
+    box-shadow:0 2px 8px rgba(4,104,191,.25);
+  ">📊 Ver Produtividade</button>
 
   <div class="tabs-mapa">
     <button class="tab-mapa ativo" id="tab-atual" onclick="mostrarAba('atual')">Atual</button>
@@ -2025,6 +2533,7 @@ var FIXOS         = {j_fixos};
 var AGUARD        = {j_aguard};
 var HOTEIS        = {j_hoteis};
 var ANTERIORES    = {j_hist};
+var DASH_STATS    = {j_dash};  // ← Estatísticas para o dashboard
 
 // ══════════════════════════════════════════════════════════════
 // CONTROLE DE QUOTA MAPBOX (persistido em localStorage)
@@ -3092,6 +3601,177 @@ if (lerUso() >= LIMITE_QUOTA) {{
 }}
 
 </script>
+<!-- ═══════════════ DASHBOARD MODAL ═══════════════ -->
+<div id="dash-overlay">
+  <div id="dash-box">
+    <div class="dash-header">
+      <div>
+        <h2>📊 Dashboard de Produtividade</h2>
+        <span id="dash-periodo"></span>
+      </div>
+      <button id="btn-fechar-dash" onclick="fecharDashboard()">✕</button>
+    </div>
+    <div class="dash-body">
+
+      <!-- Tabs -->
+      <div class="dash-tabs">
+        <button class="dash-tab ativo" onclick="dashTab('resumo',this)">Resumo</button>
+        <button class="dash-tab" onclick="dashTab('comparativo',this)">Comparativo</button>
+        <button class="dash-tab" onclick="dashTab('deslocamentos',this)">Deslocamentos</button>
+      </div>
+
+      <!-- Tab Resumo -->
+      <div class="dash-tab-panel ativo" id="dtab-resumo">
+        <div class="dash-kpi-grid" id="dash-kpis"></div>
+        <div class="dash-section">
+          <div class="dash-section-title">⚡ Taxa de Conclusão</div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="dash-progress" style="width:0%"></div>
+          </div>
+          <div class="progress-label">
+            <span id="dash-prog-label-esq"></span>
+            <span id="dash-prog-pct"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab Comparativo -->
+      <div class="dash-tab-panel" id="dtab-comparativo">
+        <div class="dash-comp-grid" id="dash-comp"></div>
+      </div>
+
+      <!-- Tab Deslocamentos -->
+      <div class="dash-tab-panel" id="dtab-deslocamentos">
+        <div class="dash-section">
+          <div class="dash-section-title">🔴 Maiores deslocamentos</div>
+          <div class="desl-lista" id="dash-maiores"></div>
+        </div>
+        <div class="dash-section" style="margin-top:16px">
+          <div class="dash-section-title">🟢 Menores deslocamentos</div>
+          <div class="desl-lista" id="dash-menores"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// DASHBOARD DE PRODUTIVIDADE
+// ══════════════════════════════════════════════════════════════
+
+function dashTab(nome, btn) {{
+  document.querySelectorAll('.dash-tab').forEach(function(b){{ b.classList.remove('ativo'); }});
+  document.querySelectorAll('.dash-tab-panel').forEach(function(p){{ p.classList.remove('ativo'); }});
+  btn.classList.add('ativo');
+  document.getElementById('dtab-' + nome).classList.add('ativo');
+}}
+
+function abrirDashboard() {{
+  renderDashboard();
+  document.getElementById('dash-overlay').classList.add('visivel');
+}}
+
+function fecharDashboard() {{
+  document.getElementById('dash-overlay').classList.remove('visivel');
+}}
+
+document.getElementById('dash-overlay').addEventListener('click', function(e) {{
+  if (e.target === this) fecharDashboard();
+}});
+
+function _delta(atual, anterior) {{
+  if (anterior == null || anterior === 0) return '';
+  var diff = atual - anterior;
+  if (diff > 0) return '<span class="delta-up">▲ ' + diff + ' vs mês ant.</span>';
+  if (diff < 0) return '<span class="delta-down">▼ ' + Math.abs(diff) + ' vs mês ant.</span>';
+  return '<span class="delta-eq">= igual ao mês ant.</span>';
+}}
+
+function renderDashboard() {{
+  var d = DASH_STATS;
+  var a = d.atual;
+  var ant = d.anterior;
+
+  document.getElementById('dash-periodo').textContent = d.label_atual;
+
+  // ── KPIs ─────────────────────────────────────────────────
+  var kpis = [
+    {{ cls:'kc-conc',  valor:a.concluidas,   label:'Concluídas',   delta: ant ? _delta(a.concluidas, ant.concluidas) : '' }},
+    {{ cls:'kc-impr',  valor:a.improdutivas, label:'Improdutivas', delta: ant ? _delta(a.improdutivas, ant.improdutivas) : '' }},
+    {{ cls:'kc-pend',  valor:a.pendentes,    label:'Pendentes',    delta: '' }},
+    {{ cls:'kc-km',    valor:a.km_total+' km', label: (a.km_fonte === 'hodômetro' ? 'Km reais (hodômetro)' : 'Km estimados'), delta: ant ? _delta(Math.round(a.km_total), Math.round(ant.km_total || 0)) : '' }},
+    {{ cls:'kc-canc',  valor:a.canceladas,   label:'Canceladas',   delta: '' }},
+    {{ cls:'kc-aguard',valor:a.aguardando,   label:'Aguardando',   delta: '' }},
+  ];
+
+  var kpiEl = document.getElementById('dash-kpis');
+  kpiEl.innerHTML = '';
+  kpis.forEach(function(k) {{
+    kpiEl.innerHTML +=
+      '<div class="kpi-card ' + k.cls + '">' +
+      '<div class="kpi-valor">' + k.valor + '</div>' +
+      '<div class="kpi-label">' + k.label + '</div>' +
+      (k.delta ? '<div class="kpi-delta">' + k.delta + '</div>' : '') +
+      '</div>';
+  }});
+
+  // ── Barra de progresso ───────────────────────────────────
+  var total = a.total;
+  var pct   = total > 0 ? Math.round((a.concluidas / total) * 100) : 0;
+  document.getElementById('dash-progress').style.width = pct + '%';
+  document.getElementById('dash-prog-pct').textContent = pct + '%';
+  document.getElementById('dash-prog-label-esq').textContent =
+    a.concluidas + ' de ' + total + ' atividades finalizadas';
+
+  // ── Comparativo ──────────────────────────────────────────
+  var compEl = document.getElementById('dash-comp');
+  compEl.innerHTML = '';
+
+  function _compCard(label, stats) {{
+    if (!stats) return '<div class="comp-card"><div class="comp-mes">' + label + '</div><div style="color:#aaa;font-size:12px;">Sem dados</div></div>';
+    return '<div class="comp-card">' +
+      '<div class="comp-mes">' + label + '</div>' +
+      '<div class="comp-row"><span>Concluídas</span><b>' + stats.concluidas + '</b></div>' +
+      '<div class="comp-row"><span>Improdutivas</span><b>' + stats.improdutivas + '</b></div>' +
+      '<div class="comp-row"><span>Canceladas</span><b>' + stats.canceladas + '</b></div>' +
+      '<div class="comp-row"><span>Total visitados</span><b>' + stats.total + '</b></div>' +
+      '<div class="comp-row"><span>Km percorridos</span><b>' + (stats.km_total || 0) + ' km</b></div>' +
+      '</div>';
+  }}
+
+  compEl.innerHTML = _compCard(d.label_atual, a) + _compCard(d.label_anterior || 'Mês anterior', ant);
+
+  // ── Deslocamentos ────────────────────────────────────────
+  function _deslLista(lista, elId, classRank) {{
+    var el = document.getElementById(elId);
+    el.innerHTML = '';
+    if (!lista || !lista.length) {{
+      el.innerHTML = '<div style="color:#aaa;font-size:12px;padding:8px">Sem dados da planilha de controle</div>';
+      return;
+    }}
+    lista.forEach(function(d, i) {{
+      var horario = (d.inicio && d.termino)
+        ? '<br><span style="color:#888;font-size:10px;">⏱ ' + d.inicio + ' — ' + d.termino + '</span>'
+        : (d.inicio ? '<br><span style="color:#888;font-size:10px;">⏱ ' + d.inicio + '</span>' : '');
+      el.innerHTML +=
+        '<div class="desl-item">' +
+        '<div class="desl-rank ' + classRank + '">' + (i+1) + '</div>' +
+        '<div class="desl-rota">' +
+          '<b>' + (d.de||'—') + '</b> → <b>' + (d.para||'—') + '</b>' +
+          horario +
+        '</div>' +
+        '<div class="desl-km ' + classRank + '">' + d.km + ' km</div>' +
+        '</div>';
+    }});
+  }}
+
+  _deslLista(a.top_maiores, 'dash-maiores', '');
+  _deslLista(a.top_menores, 'dash-menores', 'menor');
+}}
+</script>
+
 </body>
 </html>"""
 
@@ -3492,7 +4172,8 @@ def main():
     publicar_mapa_github(BASE_DIR / "MAPA_ROTAS.html")
 
     print("   → Atualizando Google Sheets...")
-    atualizar_sheets(ws, df_fixas, rota_final, sites_originais, df_aguardando)
+    atualizar_sheets(ws, df_fixas, rota_final, sites_originais, df_aguardando,
+                     historico_meses=historico_meses)
 
     # Mover arquivos processados
     if arquivos_novas:
