@@ -1554,11 +1554,10 @@ def carregar_hoteis():
 # GERAÇÃO DE MAPA — MAPBOX GL JS
 # ============================================================
 
-def ler_km_hodometro(client):
+def ler_km_hodometro(client, nome_aba=None):
     """
-    Lê o km total do mês vigente da planilha 'Controle Diário de Atividades'.
-    Busca a aba do mês atual (padrão: 'MAIO - 26'), localiza o total
-    da coluna DESLOCAMENTO (última linha com valor numérico nessa coluna).
+    Lê o km total de uma aba da planilha 'Controle Diário de Atividades'.
+    Se nome_aba não for informado, usa o mês vigente (padrão: 'MAIO - 26').
     Retorna float com o km total, ou None se não encontrar.
     """
     meses_pt = [
@@ -1566,8 +1565,9 @@ def ler_km_hodometro(client):
         "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
     ]
     now = datetime.now()
-    # Padrão da aba: "MAIO - 26"
-    nome_aba = f"{meses_pt[now.month - 1]} - {str(now.year)[-2:]}"
+
+    if nome_aba is None:
+        nome_aba = f"{meses_pt[now.month - 1]} - {str(now.year)[-2:]}"
 
     try:
         sh = client.open_by_key(CONTROLE_KM_ID)
@@ -1575,7 +1575,6 @@ def ler_km_hodometro(client):
         print(f"   ⚠️  Controle KM: não foi possível abrir a planilha — {e}")
         return None
 
-    # Tentar encontrar a aba do mês
     ws_km = None
     for ws in sh.worksheets():
         titulo_norm = remove_acentos(ws.title.strip().upper())
@@ -1597,7 +1596,6 @@ def ler_km_hodometro(client):
     if not dados:
         return None
 
-    # Identificar coluna DESLOCAMENTO pelo cabeçalho
     cabecalho = None
     col_desl = None
     for i, linha in enumerate(dados):
@@ -1614,8 +1612,6 @@ def ler_km_hodometro(client):
         print("   ⚠️  Controle KM: coluna DESLOCAMENTO não encontrada.")
         return None
 
-    # Percorrer a coluna de baixo para cima buscando o total
-    # O total é o último valor numérico significativo (geralmente na linha de totais)
     km_total = None
     for linha in reversed(dados[cabecalho + 1:]):
         if col_desl >= len(linha):
@@ -1623,7 +1619,6 @@ def ler_km_hodometro(client):
         cel = str(linha[col_desl]).strip()
         if not cel:
             continue
-        # Limpar "KM", espaços, pontos de milhar, vírgula decimal
         cel_num = re.sub(r'[^\d.,]', '', cel).replace('.', '').replace(',', '.')
         try:
             valor = float(cel_num)
@@ -1634,9 +1629,9 @@ def ler_km_hodometro(client):
             continue
 
     if km_total is not None:
-        print(f"   ✅ Controle KM ({nome_aba}): {km_total:.0f} km reais lidos do hodômetro.")
+        print(f"   ✅ Controle KM ({nome_aba}): {km_total:.0f} km lidos do hodômetro.")
     else:
-        print(f"   ⚠️  Controle KM: nenhum valor encontrado na coluna DESLOCAMENTO.")
+        print(f"   ⚠️  Controle KM ({nome_aba}): nenhum valor encontrado.")
 
     return km_total
 
@@ -1968,8 +1963,26 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     deslocamentos_reais = []
     try:
         _client_km = conectar_sheets()
-        km_real = ler_km_hodometro(_client_km)
+        km_real = ler_km_hodometro(_client_km)  # mês atual
         deslocamentos_reais = _ler_deslocamentos_controle(_client_km)
+
+        # ── Km do mês anterior para o comparativo ────────────────────────
+        if stats_anterior is not None:
+            meses_pt_km = [
+                "JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
+                "JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO",
+            ]
+            _now = datetime.now()
+            _mes_ant_idx = (_now.month - 2) % 12
+            _ano_ant = _now.year if _now.month > 1 else _now.year - 1
+            nome_aba_ant_km = f"{meses_pt_km[_mes_ant_idx]} - {str(_ano_ant)[-2:]}"
+            km_ant = ler_km_hodometro(_client_km, nome_aba=nome_aba_ant_km)
+            if km_ant is not None:
+                stats_anterior["km_total"] = round(km_ant, 1)
+                stats_anterior["km_fonte"] = "hodômetro"
+            else:
+                stats_anterior["km_fonte"] = "indisponível"
+
     except Exception as _e:
         print(f"   ⚠️  Controle KM: erro na conexão — {_e}")
 
@@ -2461,7 +2474,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
   ">📊 Ver Produtividade</button>
 
   <div class="tabs-mapa">
-    <button class="tab-mapa ativo" id="tab-atual" onclick="mostrarAba('atual')">Atual</button>
+    <button class="tab-mapa ativo" id="tab-atual" onclick="modoAnterior ? location.reload() : mostrarAba('atual')">Atual</button>
     <button class="tab-mapa" id="tab-anteriores" onclick="mostrarAba('anteriores')">Anteriores</button>
   </div>
 
@@ -2515,7 +2528,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
       <select class="select-ant" id="sel-mes-ant"></select>
     </div>
     <button class="btn-ant" onclick="mostrarMesAnterior()">Ver</button>
-    <button class="btn-ant btn-ant-cinza" onclick="voltarAtual()">Voltar ao atual</button>
+    <button class="btn-ant btn-ant-cinza" onclick="location.reload()">Voltar ao atual</button>
     <div id="msg-ant"></div>
   </div>
 </div>
