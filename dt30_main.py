@@ -1,5 +1,5 @@
 """
-DT 3.2.1 - Automação Drive Test
+DT 3.2.2 - Automação Drive Test
 Organiza atividades, otimiza rota, atualiza Google Sheets,
 gera relatórios e mapa em um único processo.
 VERSÃO MAPBOX: Rotas reais com trânsito para próxima atividade.
@@ -47,6 +47,8 @@ ST_IMPRODUTIVO  = "IMPRODUTIVO"
 ST_DESLOCAMENTO = ">> EM DESLOCAMENTO"
 ST_AGUARDANDO   = "Aguardando para deslocar"
 ST_NOVA         = "Nova Atividade"
+ST_INICIADA     = "Atividade iniciada"
+ST_RISCO        = "ÁREA DE RISCO"
 STATUS_FIXOS    = {ST_CONCLUIDO, ST_IMPRODUTIVO}
 
 # Colunas da planilha (índice 0)
@@ -752,7 +754,8 @@ def status_fixo_mapa(status):
     return (
         "CONCLUID" in s_norm
         or "IMPRODUT" in s_norm
-        or "CANCEL" in s_norm
+        or "CANCEL"  in s_norm
+        or "RISCO"   in s_norm
     )
 
 
@@ -764,7 +767,9 @@ def mask_status_fixos_mapa(df):
 
 def tipo_status_mapa(status):
     s_norm = _normalizar_status_mapa(status)
-    if "CANCEL" in s_norm:
+    if "RISCO"    in s_norm:
+        return "risco"
+    if "CANCEL"   in s_norm:
         return "cancelada"
     if "CONCLUID" in s_norm:
         return "concluida"
@@ -930,6 +935,7 @@ def montar_alerta_historico(site, visitas):
         "concluida":   "concluído",
         "improdutiva": "improdutivo",
         "cancelada":   "cancelado",
+        "risco":       "⚠️ ÁREA DE RISCO",
     }
 
     linhas = [f"⚠️ {site} já visitado:"]
@@ -1750,7 +1756,7 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
         print("   ⚠️  Token Mapbox ausente — rota será linha reta")
     else:
         print("   ℹ️  Sem atividades pendentes — rota vazia")
-
+    
     j_rota_real = json.dumps(rota_real_data, ensure_ascii=False)
 
     # ── Calcular estatísticas para o Dashboard ───────────────────────────
@@ -1759,6 +1765,7 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
         concluidas   = [p for p in pontos_fixos_lista if p.get("tipo") == "concluida"]
         improdutivas = [p for p in pontos_fixos_lista if p.get("tipo") == "improdutiva"]
         canceladas   = [p for p in pontos_fixos_lista if p.get("tipo") == "cancelada"]
+        risco        = [p for p in pontos_fixos_lista if p.get("tipo") == "risco"]
         pendentes    = pontos_rota_lista
         aguardando   = pontos_aguard_lista
 
@@ -1766,9 +1773,10 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
             "concluidas":   len(concluidas),
             "improdutivas": len(improdutivas),
             "canceladas":   len(canceladas),
+            "risco":        len(risco),
             "pendentes":    len(pendentes),
             "aguardando":   len(aguardando),
-            "total":        len(concluidas) + len(improdutivas) + len(canceladas),
+            "total":        len(concluidas) + len(improdutivas) + len(canceladas) + len(risco),
             "km_total":     0.0,   # será preenchido pelo hodômetro real
             "top_maiores":  [],    # será preenchido pela planilha de controle
             "top_menores":  [],    # será preenchido pela planilha de controle
@@ -2063,6 +2071,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 .dot-conc{{background:#27ae60;}}
 .dot-impr{{background:#e74c3c;}}
 .dot-canc{{background:#7f8c8d;}}
+.dot-risco{{background:#1a0a00;border:2px solid #e74c3c;}}
 .dot-part{{background:#f39c12;border:2px solid #b7770d;}}
 .dot-hotel{{background:#e67e22;}}
 .dot-aguard{{background:#8e44ad;}}
@@ -2235,6 +2244,10 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
   100%{{transform:scale(1.55);opacity:0;}}
 }}
 @keyframes dtSpin{{to{{transform:rotate(360deg);}}}}
+@keyframes riscoGlow{{
+  0%,100%{{box-shadow:0 0 6px rgba(231,76,60,.6);}}
+  50%{{box-shadow:0 0 16px rgba(231,76,60,1),0 0 30px rgba(231,76,60,.4);}}
+}}
 
 /* ── Próxima atividade (estrela pulsante) ────────── */
 .proxima-pulse{{
@@ -2374,6 +2387,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 .kc-km  {{border-top:3px solid #0468BF;}} .kc-km .kpi-valor{{color:#0468BF;font-size:22px;}}
 .kc-canc{{border-top:3px solid #CAC8AF;}} .kc-canc .kpi-valor{{color:#888;}}
 .kc-aguard{{border-top:3px solid #78B593;}} .kc-aguard .kpi-valor{{color:#78B593;}}
+.kc-risco{{border-top:3px solid #e74c3c;background:#fff0f0;}} .kc-risco .kpi-valor{{color:#c0392b;font-size:22px;}}
 
 /* ── Barra de progresso ─── */
 .dash-section{{margin-bottom:18px;}}
@@ -2514,6 +2528,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
     <label class="filtro"><input type="checkbox" id="chk-conc" checked onchange="toggleCamada('conc',this.checked)"/><span class="dot dot-conc"></span> Concluídas</label>
     <label class="filtro"><input type="checkbox" id="chk-impr" checked onchange="toggleCamada('impr',this.checked)"/><span class="dot dot-impr"></span> Improdutivas</label>
     <label class="filtro"><input type="checkbox" id="chk-canc" checked onchange="toggleCamada('canc',this.checked)"/><span class="dot dot-canc"></span> Canceladas</label>
+    <label class="filtro"><input type="checkbox" id="chk-risco" checked onchange="toggleCamada('risco',this.checked)"/><span class="dot dot-risco"></span> ☠️ Área de Risco</label>
     <label class="filtro"><input type="checkbox" id="chk-hotel" onchange="toggleCamada('hotel',this.checked)"/><span class="dot dot-hotel"></span> Hotéis</label>
     <label class="filtro"><input type="checkbox" id="chk-aguard" checked onchange="toggleCamada('aguard',this.checked)"/><span class="dot dot-aguard"></span> Aguardando</label>
     <label class="filtro"><input type="checkbox" id="chk-traffic" onchange="toggleTraffic(this.checked)"/><span style="width:12px;height:12px;display:inline-block;background:linear-gradient(90deg,#27ae60,#f39c12,#e74c3c);border-radius:3px;flex-shrink:0;"></span> Trânsito</label>
@@ -2911,11 +2926,22 @@ function criarElPendente(ordem) {{
 }}
 
 function criarElFixo(tipo) {{
-  var cores = {{ concluida:'#27ae60', improdutiva:'#e74c3c', cancelada:'#7f8c8d' }};
-  var simbolos = {{ concluida:'✓', improdutiva:'✗', cancelada:'⊘' }};
+  var cores    = {{ concluida:'#27ae60', improdutiva:'#e74c3c', cancelada:'#7f8c8d', risco:'#1a0a00' }};
+  var simbolos = {{ concluida:'✓', improdutiva:'✗', cancelada:'⊘', risco:'☠️' }};
   var el = document.createElement('div');
-  el.style.cssText = 'width:20px;height:20px;border-radius:50%;background:' + (cores[tipo]||'#888') +
-    ';border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;font-size:11px;color:white;font-weight:700;cursor:pointer;';
+  if (tipo === 'risco') {{
+    // Marcador caveira com borda vermelha pulsante
+    el.style.cssText =
+      'width:26px;height:26px;border-radius:50%;background:#1a0a00;' +
+      'border:2px solid #e74c3c;box-shadow:0 0 8px rgba(231,76,60,.7),0 2px 6px rgba(0,0,0,.4);' +
+      'display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer;' +
+      'animation:riscoGlow 1.8s ease-in-out infinite;';
+  }} else {{
+    el.style.cssText =
+      'width:20px;height:20px;border-radius:50%;background:' + (cores[tipo]||'#888') +
+      ';border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25);' +
+      'display:flex;align-items:center;justify-content:center;font-size:11px;color:white;font-weight:700;cursor:pointer;';
+  }}
   el.textContent = simbolos[tipo] || '?';
   return el;
 }}
@@ -3030,14 +3056,16 @@ map.on('load', function() {{
   }});
 
   // ── Fixos (concluídas, improdutivas, canceladas) ──────────
-  mkFixos = {{ conc:[], impr:[], canc:[] }};
+  mkFixos = {{ conc:[], impr:[], canc:[], risco:[] }};
   FIXOS.forEach(function(p) {{
     var el = criarElFixo(p.tipo);
     var statusHtml = p.tipo === 'concluida'
       ? '<div class="popup-status ps-conc">✓ Concluída</div>'
       : p.tipo === 'cancelada'
         ? '<div class="popup-status ps-canc">⊘ Cancelada</div>'
-        : '<div class="popup-status ps-impr">✗ Improdutiva</div>';
+        : p.tipo === 'risco'
+          ? '<div class="popup-status" style="background:#3d0000;color:#ff6b6b;font-weight:700;">☠️ ÁREA DE RISCO — Não retornar!</div>'
+          : '<div class="popup-status ps-impr">✗ Improdutiva</div>';
     var popup = new mapboxgl.Popup({{offset:20}}).setHTML(
       popupContent(p.id,
         ['<b>Cidade:</b> ' + p.cidade,
@@ -3051,11 +3079,16 @@ map.on('load', function() {{
       .setPopup(popup)
       .addTo(map);
 
-    registrarSite(p.id, mk, p.lat, p.lon, p.tipo === 'concluida' ? 'conc' : p.tipo === 'cancelada' ? 'canc' : 'impr');
+    var camada = p.tipo === 'concluida' ? 'conc'
+               : p.tipo === 'cancelada' ? 'canc'
+               : p.tipo === 'risco'     ? 'risco'
+               : 'impr';
+    registrarSite(p.id, mk, p.lat, p.lon, camada);
 
-    if (p.tipo === 'concluida') mkFixos.conc.push(mk);
-    else if (p.tipo === 'cancelada') mkFixos.canc.push(mk);
-    else mkFixos.impr.push(mk);
+    if      (p.tipo === 'concluida')   mkFixos.conc.push(mk);
+    else if (p.tipo === 'cancelada')   mkFixos.canc.push(mk);
+    else if (p.tipo === 'risco')       mkFixos.risco.push(mk);
+    else                               mkFixos.impr.push(mk);
   }});
 
   // ── Aguardando ────────────────────────────────────────────
@@ -3133,6 +3166,7 @@ function toggleCamada(nome, visivel) {{
   var lista = nome === 'conc'  ? mkFixos.conc
             : nome === 'impr'  ? mkFixos.impr
             : nome === 'canc'  ? mkFixos.canc
+            : nome === 'risco' ? mkFixos.risco
             : nome === 'hotel' ? mkHoteis
             : nome === 'aguard'? mkAguard
             : [];
@@ -3243,6 +3277,7 @@ function _tipoLabel(tipo) {{
   if (!tipo) return '';
   if (tipo === 'concluida') return '<span class="bg-rel-tipo bg-rel-conc">✓ Concluída</span>';
   if (tipo === 'cancelada')  return '<span class="bg-rel-tipo bg-rel-canc">⊘ Cancelada</span>';
+  if (tipo === 'risco')      return '<span class="bg-rel-tipo" style="background:#3d0000;color:#ff6b6b;">☠️ Área de Risco</span>';
   return '<span class="bg-rel-tipo bg-rel-impr">✗ Improdutiva</span>';
 }}
 
@@ -3579,6 +3614,7 @@ function voltarAtual() {{
   document.getElementById('chk-conc').checked  && mkFixos.conc.forEach(function(mk){{ mk.getElement().style.display=''; }});
   document.getElementById('chk-impr').checked  && mkFixos.impr.forEach(function(mk){{ mk.getElement().style.display=''; }});
   document.getElementById('chk-canc').checked  && mkFixos.canc.forEach(function(mk){{ mk.getElement().style.display=''; }});
+  document.getElementById('chk-risco').checked && mkFixos.risco.forEach(function(mk){{ mk.getElement().style.display=''; }});
   document.getElementById('chk-aguard').checked && mkAguard.forEach(function(mk){{ mk.getElement().style.display=''; }});
   mostrarAba('atual');
   atualizarContador();
@@ -3717,6 +3753,7 @@ function renderDashboard() {{
     {{ cls:'kc-km',    valor:a.km_total+' km', label: (a.km_fonte === 'hodômetro' ? 'Km reais (hodômetro)' : 'Km estimados'), delta: ant ? _delta(Math.round(a.km_total), Math.round(ant.km_total || 0)) : '' }},
     {{ cls:'kc-canc',  valor:a.canceladas,   label:'Canceladas',   delta: '' }},
     {{ cls:'kc-aguard',valor:a.aguardando,   label:'Aguardando',   delta: '' }},
+    {{ cls:'kc-risco', valor:a.risco||0,     label:'☠️ Área de Risco', delta: '' }},
   ];
 
   var kpiEl = document.getElementById('dash-kpis');
@@ -3749,6 +3786,7 @@ function renderDashboard() {{
       '<div class="comp-row"><span>Concluídas</span><b>' + stats.concluidas + '</b></div>' +
       '<div class="comp-row"><span>Improdutivas</span><b>' + stats.improdutivas + '</b></div>' +
       '<div class="comp-row"><span>Canceladas</span><b>' + stats.canceladas + '</b></div>' +
+      '<div class="comp-row"><span>☠️ Área de Risco</span><b>' + (stats.risco||0) + '</b></div>' +
       '<div class="comp-row"><span>Total visitados</span><b>' + stats.total + '</b></div>' +
       '<div class="comp-row"><span>Km percorridos</span><b>' + (stats.km_total || 0) + ' km</b></div>' +
       '</div>';
@@ -4227,10 +4265,225 @@ def main():
 
 
 # ============================================================
+# MODO AUTOMÁTICO (Task Scheduler — --auto)
+# ============================================================
+
+AUTO_HASH_PATH = BASE_DIR / ".dt30_auto_hash"   # guarda estado da última execução
+
+
+def _hash_atividades(df_sheets):
+    """Gera hash simples do estado atual das atividades (site + status)."""
+    import hashlib
+    conteudo = ";".join(
+        f"{r.get('SITE','')}:{r.get('STATUS','')}"
+        for _, r in df_sheets.iterrows()
+    )
+    return hashlib.md5(conteudo.encode()).hexdigest()
+
+
+def _horario_permitido():
+    """Retorna True se estiver dentro de segunda–sexta, 07h–18h."""
+    now = datetime.now()
+    if now.weekday() >= 5:          # 5=sábado, 6=domingo
+        return False, f"Fim de semana ({now.strftime('%A')})"
+    if not (7 <= now.hour < 18):
+        return False, f"Fora do horário ({now.strftime('%H:%M')})"
+    return True, "OK"
+
+
+def main_auto():
+    """
+    Modo automático — chamado pelo Task Scheduler com argumento --auto.
+    Sem interação com o usuário. Verifica horário, detecta mudanças
+    e atualiza o mapa apenas se houver algo novo.
+    """
+    log_lines = []
+
+    def log(msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        linha = f"[{ts}] {msg}"
+        print(linha)
+        log_lines.append(linha)
+
+    def salvar_log(sucesso):
+        """Salva log em dt30_auto.log na pasta do exe."""
+        log_path = BASE_DIR / "dt30_auto.log"
+        status = "OK" if sucesso else "ERRO"
+        cabecalho = f"\n{'='*55}\n{datetime.now().strftime('%d/%m/%Y %H:%M')} — {status}\n{'='*55}\n"
+        try:
+            linhas_existentes = []
+            if log_path.exists():
+                linhas_existentes = log_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            # Manter apenas últimas 300 linhas para não crescer indefinidamente
+            conteudo = "".join(linhas_existentes[-300:])
+            conteudo += cabecalho + "\n".join(log_lines) + "\n"
+            log_path.write_text(conteudo, encoding="utf-8")
+        except Exception:
+            pass
+
+    log("DT 3.0 — Modo Automático iniciado")
+
+    # ── 1. Verificar horário ──────────────────────────────────────────────
+    permitido, motivo = _horario_permitido()
+    if not permitido:
+        log(f"⏭  Execução ignorada: {motivo}")
+        salvar_log(True)
+        return
+
+    log(f"✅ Horário permitido: {datetime.now().strftime('%A %d/%m %H:%M')}")
+
+    # ── 2. Verificar credenciais ──────────────────────────────────────────
+    if not CREDS_PATH.exists():
+        log(f"❌ credentials.json não encontrado em {BASE_DIR}")
+        salvar_log(False)
+        return
+
+    # ── 3. Conectar e ler Sheets ──────────────────────────────────────────
+    try:
+        log("Conectando ao Google Sheets...")
+        client = conectar_sheets()
+        sheet  = client.open_by_key(SHEET_ID)
+        ws     = obter_aba_vigente(sheet)
+        df_sheets = ler_atividades_sheets(ws)
+        log(f"{len(df_sheets)} atividades lidas da planilha.")
+    except Exception as e:
+        log(f"❌ Erro ao conectar ao Sheets: {e}")
+        salvar_log(False)
+        return
+
+    # ── 4. Detectar mudanças desde a última execução ──────────────────────
+    hash_atual = _hash_atividades(df_sheets)
+    hash_anterior = ""
+    if AUTO_HASH_PATH.exists():
+        try:
+            hash_anterior = AUTO_HASH_PATH.read_text().strip()
+        except Exception:
+            pass
+
+    if hash_atual == hash_anterior:
+        log("⏭  Nenhuma mudança detectada na planilha — mapa não será atualizado.")
+        salvar_log(True)
+        return
+
+    log("🔄 Mudança detectada — atualizando mapa...")
+
+    # ── 5. Determinar ponto de partida automaticamente ───────────────────
+    # Usa a última atividade concluída como ponto de partida (sem perguntar)
+    lat0, lon0, cidade0 = None, None, None
+
+    concluidas = df_sheets[df_sheets["STATUS"] == ST_CONCLUIDO].copy()
+    if not concluidas.empty:
+        ultima = concluidas.iloc[-1]
+        try:
+            lat0    = float(str(ultima["LAT"]).replace(",", "."))
+            lon0    = float(str(ultima["LONG"]).replace(",", "."))
+            cidade0 = str(ultima.get("CIDADE", "")) or "Local"
+            log(f"📍 Partida automática: {ultima['SITE']} — {cidade0}")
+        except Exception:
+            lat0 = lon0 = None
+
+    if lat0 is None or lat0 == 0.0:
+        # Fallback: tentar geolocalização por IP
+        try:
+            r = requests.get("http://ip-api.com/json/", timeout=5)
+            d = r.json()
+            if d.get("status") == "success":
+                lat0    = d["lat"]
+                lon0    = d["lon"]
+                cidade0 = d.get("city", "Local detectado")
+                log(f"📍 Partida por IP: {cidade0} ({lat0}, {lon0})")
+        except Exception:
+            pass
+
+    if lat0 is None:
+        log("⚠️  Ponto de partida não determinado — usando Belo Horizonte como padrão.")
+        lat0, lon0, cidade0 = -19.95, -43.93, "Belo Horizonte"
+
+    # ── 6. Preparar dados para o mapa ────────────────────────────────────
+    df_fixas = df_sheets[mask_status_fixos_mapa(df_sheets)].copy()
+    df_aguardando = df_sheets[
+        df_sheets["STATUS"].str.strip() == ST_AGUARDANDO
+    ].copy()
+    df_pendentes = df_sheets[
+        ~mask_status_fixos_mapa(df_sheets) &
+        (df_sheets["STATUS"].str.strip() != ST_AGUARDANDO)
+    ].copy()
+    df_pendentes = df_pendentes.dropna(subset=["LAT", "LONG"])
+    df_pendentes = df_pendentes[
+        (df_pendentes["LAT"] != 0) & (df_pendentes["LONG"] != 0)
+    ]
+
+    # ── 7. Token Mapbox ───────────────────────────────────────────────────
+    mapbox_token = carregar_mapbox_token()
+    if not mapbox_token:
+        log("⚠️  mapbox_token.txt não encontrado — mapa sem rota real.")
+
+    # ── 8. Histórico de meses anteriores ─────────────────────────────────
+    try:
+        log("Carregando histórico de meses anteriores...")
+        historico_meses = carregar_meses_anteriores(sheet, ws.title)
+    except Exception as e:
+        log(f"⚠️  Erro ao carregar histórico: {e}")
+        historico_meses = {}
+
+    # ── 9. Gerar mapa ─────────────────────────────────────────────────────
+    try:
+        log("Gerando mapa interativo...")
+        gerar_mapa(
+            df_pendentes, lat0, lon0, cidade0,
+            df_fixas=df_fixas,
+            df_aguardando=df_aguardando,
+            historico_meses=historico_meses,
+            mapbox_token=mapbox_token,
+        )
+    except Exception as e:
+        log(f"❌ Erro ao gerar mapa: {e}")
+        salvar_log(False)
+        return
+
+    # ── 10. Publicar no GitHub ────────────────────────────────────────────
+    try:
+        log("Publicando mapa no GitHub Pages...")
+        publicar_mapa_github(BASE_DIR / "MAPA_ROTAS.html")
+    except Exception as e:
+        log(f"⚠️  Erro ao publicar: {e}")
+
+    # ── 11. Salvar hash do estado atual ───────────────────────────────────
+    try:
+        AUTO_HASH_PATH.write_text(hash_atual)
+    except Exception:
+        pass
+
+    log("✅ Mapa atualizado automaticamente com sucesso!")
+    salvar_log(True)
+
+
+# ============================================================
 # PONTO DE ENTRADA
 # ============================================================
 
 if __name__ == "__main__":
+
+    # ── Modo automático (Task Scheduler) ─────────────────────────────────
+    if "--auto" in sys.argv:
+        try:
+            main_auto()
+        except Exception as e:
+            print(f"❌ Erro inesperado no modo auto: {e}")
+            import traceback
+            traceback.print_exc()
+            # Salvar no log mesmo em caso de crash
+            log_path = BASE_DIR / "dt30_auto.log"
+            try:
+                ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+                log_path.open("a", encoding="utf-8").write(
+                    f"\n{'='*55}\n{ts} — CRASH\n{traceback.format_exc()}\n"
+                )
+            except Exception:
+                pass
+        sys.exit(0)
+
+    # ── Modo interativo (execução manual) ────────────────────────────────
     print("\n" + "=" * 60)
     print("  DT 3.0 — Automação Drive Test")
     print("=" * 60)
