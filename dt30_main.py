@@ -1,5 +1,5 @@
 """
-DT 3.2.2 - Automação Drive Test
+DT 3.0 - Automação Drive Test
 Organiza atividades, otimiza rota, atualiza Google Sheets,
 gera relatórios e mapa em um único processo.
 VERSÃO MAPBOX: Rotas reais com trânsito para próxima atividade.
@@ -28,42 +28,44 @@ def get_base_dir():
     return Path(os.path.abspath(__file__)).parent
 
 
-BASE_DIR = get_base_dir()
-PASTA_NOVAS = BASE_DIR / "novas atividades"
-PASTA_OUT = BASE_DIR / "out"
-BASE_4G_PATH = BASE_DIR / "Base_4G.xlsx"
-CREDS_PATH = BASE_DIR / "credentials.json"
-SHEET_ID = "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE"
-GITHUB_TOKEN_PATH = BASE_DIR / "github_token.txt"
-HOTEIS_PATH = BASE_DIR / "HOTEIS.xlsx"
-HOTEIS_SHEET_ID = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
-HOTEIS_GID = 965678690
-MAPBOX_TOKEN_PATH = BASE_DIR / "mapbox_token.txt"
-CONTROLE_KM_ID = "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k"  # Controle Diário de Atividades
+BASE_DIR           = get_base_dir()
+PASTA_NOVAS        = BASE_DIR / "novas atividades"
+PASTA_OUT          = BASE_DIR / "out"
+BASE_4G_PATH       = BASE_DIR / "Base_4G.xlsx"
+CREDS_PATH         = BASE_DIR / "credentials.json"
+SHEET_ID           = "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE"
+GITHUB_TOKEN_PATH  = BASE_DIR / "github_token.txt"
+HOTEIS_PATH        = BASE_DIR / "HOTEIS.xlsx"
+HOTEIS_SHEET_ID    = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
+HOTEIS_GID         = 965678690
+MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"
+CONTROLE_KM_ID     = "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k"  # Controle Diário de Atividades
 
 # Status da planilha
-ST_CONCLUIDO = "✓ Atividade concluída"
-ST_IMPRODUTIVO = "IMPRODUTIVO"
+ST_CONCLUIDO    = "✓ Atividade concluída"
+ST_IMPRODUTIVO  = "IMPRODUTIVO"
 ST_DESLOCAMENTO = ">> EM DESLOCAMENTO"
-ST_AGUARDANDO = "Aguardando para deslocar"
-ST_NOVA = "Nova Atividade"
-STATUS_FIXOS = {ST_CONCLUIDO, ST_IMPRODUTIVO}
+ST_AGUARDANDO   = "Aguardando para deslocar"
+ST_NOVA         = "Nova Atividade"
+ST_INICIADA     = "Atividade iniciada"
+ST_RISCO        = "ÁREA DE RISCO"
+STATUS_FIXOS    = {ST_CONCLUIDO, ST_IMPRODUTIVO}
 
 # Colunas da planilha (índice 0)
 CI = {
-    "DEMANDA": 0,  # A
+    "DEMANDA":    0,  # A
     "INTEGRACAO": 1,  # B
-    "SITE": 2,  # C
-    "UF": 3,  # D
-    "TEC": 4,  # E
-    "LAT": 5,  # F
-    "LON": 6,  # G
-    "CIDADE": 7,  # H
-    "TEC_4G": 8,  # I
-    "TEC_5G": 9,  # J
-    "STATUS": 10,  # K
+    "SITE":       2,  # C
+    "UF":         3,  # D
+    "TEC":        4,  # E
+    "LAT":        5,  # F
+    "LON":        6,  # G
+    "CIDADE":     7,  # H
+    "TEC_4G":     8,  # I
+    "TEC_5G":     9,  # J
+    "STATUS":    10,  # K
     "CONCLUIDO": 11,  # L
-    "HOTEL": 12,  # M
+    "HOTEL":     12,  # M
 }
 
 DATA_START_ROW = 3
@@ -142,21 +144,20 @@ _ORDEM_TEC = ["2G", "3G", "4G", "5G"]
 
 # Aliases → tecnologia canônica
 _ALIAS_TEC = {
-    "LTE": "4G",
-    "4G": "4G",
-    "NR": "5G",
-    "5G": "5G",
-    "3G": "3G",
+    "LTE":  "4G",
+    "4G":   "4G",
+    "NR":   "5G",
+    "5G":   "5G",
+    "3G":   "3G",
     "UMTS": "3G",
-    "WCDMA": "3G",
-    "2G": "2G",
-    "GSM": "2G",
+    "WCDMA":"3G",
+    "2G":   "2G",
+    "GSM":  "2G",
     "EDGE": "2G",
     # Combinações coladas comuns
-    "2GLTE": None,  # sinal para expandir → 2G + 4G
-    "LTENR": None,  # sinal para expandir → 4G + 5G
+    "2GLTE": None,   # sinal para expandir → 2G + 4G
+    "LTENR": None,   # sinal para expandir → 4G + 5G
 }
-
 
 def normalizar_tec(valor):
     """
@@ -203,11 +204,9 @@ def normalizar_tec(valor):
                 if canonical:
                     techs.add(canonical)
                 elif st == "2GLTE":
-                    techs.add("2G");
-                    techs.add("4G")
+                    techs.add("2G"); techs.add("4G")
                 elif st == "LTENR":
-                    techs.add("4G");
-                    techs.add("5G")
+                    techs.add("4G"); techs.add("5G")
             elif st in ("TE",):
                 # "TE" sozinho = fragmento de "LTE"
                 techs.add("4G")
@@ -260,11 +259,9 @@ def inferir_tec_de_freq(freq_4g_str, freq_5g_str):
 
 def _ordenar_nums_4g(nums_str):
     """Ordena números 4G pela sequência definida em ORDEM_BANDA_4G."""
-
     def chave(x):
         num = int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 9999
         return ORDEM_BANDA_4G.index(num) if num in ORDEM_BANDA_4G else 99
-
     return sorted(nums_str, key=chave)
 
 
@@ -357,8 +354,8 @@ def _normalizar_com_blocos(freq):
             # Segmento sem prefixo de banda — ignorar (pode ser separador solto)
             continue
 
-        banda = m_banda.group(1).upper()
-        resto = seg[m_banda.end():]
+        banda  = m_banda.group(1).upper()
+        resto  = seg[m_banda.end():]
         numeros = _limpar_numeros_do_bloco(resto)
 
         if banda == "2G":
@@ -512,7 +509,6 @@ def _normalizar_sem_blocos(freq):
     freq_5g = ("5G: " + "/".join(str(n) for n in nums_5g)) if nums_5g else ""
     return freq_4g, freq_5g
 
-
 # ============================================================
 # DISTÂNCIA / OTIMIZAÇÃO DE ROTA
 # ============================================================
@@ -572,7 +568,7 @@ def two_opt(df, lat0, lon0):
         melhorou = False
         for i in range(len(coords) - 1):
             for j in range(i + 2, len(coords)):
-                nova = coords[:i + 1] + coords[i + 1:j + 1][::-1] + coords[j + 1:]
+                nova = coords[:i+1] + coords[i+1:j+1][::-1] + coords[j+1:]
                 d = _dist_coords(nova, lat0, lon0)
                 if d < melhor_d - 1e-6:
                     coords = nova
@@ -600,17 +596,17 @@ def three_opt(df, lat0, lon0):
         for i in range(n - 2):
             for j in range(i + 1, n - 1):
                 for k in range(j + 1, n):
-                    A = coords[:i + 1]
-                    B = coords[i + 1:j + 1]
-                    C = coords[j + 1:k + 1]
-                    D = coords[k + 1:]
+                    A = coords[:i+1]
+                    B = coords[i+1:j+1]
+                    C = coords[j+1:k+1]
+                    D = coords[k+1:]
                     candidatos = [
-                        A + B[::-1] + C + D,
-                        A + B + C[::-1] + D,
+                        A + B[::-1] + C       + D,
+                        A + B       + C[::-1] + D,
                         A + B[::-1] + C[::-1] + D,
-                        A + C + B + D,
-                        A + C + B[::-1] + D,
-                        A + C[::-1] + B + D,
+                        A + C       + B       + D,
+                        A + C       + B[::-1] + D,
+                        A + C[::-1] + B       + D,
                         A + C[::-1] + B[::-1] + D,
                     ]
                     for cand in candidatos:
@@ -756,9 +752,10 @@ def _normalizar_status_mapa(status):
 def status_fixo_mapa(status):
     s_norm = _normalizar_status_mapa(status)
     return (
-            "CONCLUID" in s_norm
-            or "IMPRODUT" in s_norm
-            or "CANCEL" in s_norm
+        "CONCLUID" in s_norm
+        or "IMPRODUT" in s_norm
+        or "CANCEL"  in s_norm
+        or "RISCO"   in s_norm
     )
 
 
@@ -770,7 +767,9 @@ def mask_status_fixos_mapa(df):
 
 def tipo_status_mapa(status):
     s_norm = _normalizar_status_mapa(status)
-    if "CANCEL" in s_norm:
+    if "RISCO"    in s_norm:
+        return "risco"
+    if "CANCEL"   in s_norm:
         return "cancelada"
     if "CONCLUID" in s_norm:
         return "concluida"
@@ -831,16 +830,16 @@ def carregar_meses_anteriores(sheet, aba_atual_nome):
 
         for _, row in df_mes.iterrows():
             historico[ano_s][mes_s]["pontos"].append({
-                "id": str(row.get("SITE", "")),
-                "cidade": str(row.get("CIDADE", "")),
-                "tec4g": str(row.get("2G|3G|4G", "")),
-                "tec5g": str(row.get("5G", "")),
+                "id":        str(row.get("SITE", "")),
+                "cidade":    str(row.get("CIDADE", "")),
+                "tec4g":     str(row.get("2G|3G|4G", "")),
+                "tec5g":     str(row.get("5G", "")),
                 "concluido": str(row.get("CONCLUIDO", "") or ""),
-                "hotel": str(row.get("HOTEL", "") or ""),
-                "status": str(row.get("STATUS", "") or ""),
-                "tipo": tipo_status_mapa(row.get("STATUS", "")),
-                "lat": normalizar_coord_mapa(row.get("LAT", 0), 90),
-                "lon": normalizar_coord_mapa(row.get("LONG", 0), 180),
+                "hotel":     str(row.get("HOTEL", "") or ""),
+                "status":    str(row.get("STATUS", "") or ""),
+                "tipo":      tipo_status_mapa(row.get("STATUS", "")),
+                "lat":       normalizar_coord_mapa(row.get("LAT", 0), 90),
+                "lon":       normalizar_coord_mapa(row.get("LONG", 0), 180),
             })
             total += 1
 
@@ -877,19 +876,19 @@ def ler_atividades_sheets(ws):
 
         registros.append({
             "ROW_SHEET": DATA_START_ROW + i,
-            "DEMANDA": linha[CI["DEMANDA"]],
+            "DEMANDA":    linha[CI["DEMANDA"]],
             "INTEGRAÇÃO": linha[CI["INTEGRACAO"]],
-            "SITE": linha[CI["SITE"]],
-            "UF": linha[CI["UF"]],
-            "TEC": normalizar_tec(linha[CI["TEC"]]),
-            "LAT": lat,
-            "LONG": lon,
-            "CIDADE": linha[CI["CIDADE"]],
-            "2G|3G|4G": linha[CI["TEC_4G"]],
-            "5G": linha[CI["TEC_5G"]],
-            "STATUS": linha[CI["STATUS"]].strip(),
-            "CONCLUIDO": linha[CI["CONCLUIDO"]],
-            "HOTEL": linha[CI["HOTEL"]],
+            "SITE":       linha[CI["SITE"]],
+            "UF":         linha[CI["UF"]],
+            "TEC":        normalizar_tec(linha[CI["TEC"]]),
+            "LAT":        lat,
+            "LONG":       lon,
+            "CIDADE":     linha[CI["CIDADE"]],
+            "2G|3G|4G":  linha[CI["TEC_4G"]],
+            "5G":         linha[CI["TEC_5G"]],
+            "STATUS":     linha[CI["STATUS"]].strip(),
+            "CONCLUIDO":  linha[CI["CONCLUIDO"]],
+            "HOTEL":      linha[CI["HOTEL"]],
         })
 
     if not registros:
@@ -913,8 +912,8 @@ def verificar_historico_site(site, historico_meses):
                 ponto_norm = remove_acentos(str(ponto.get("id", "")).strip().upper())
                 if ponto_norm == site_norm:
                     visitas.append({
-                        "label": pac["label"],
-                        "tipo": ponto.get("tipo", ""),
+                        "label":     pac["label"],
+                        "tipo":      ponto.get("tipo", ""),
                         "concluido": ponto.get("concluido", ""),
                     })
 
@@ -933,15 +932,16 @@ def montar_alerta_historico(site, visitas):
         return ""
 
     tipo_label = {
-        "concluida": "concluído",
+        "concluida":   "concluído",
         "improdutiva": "improdutivo",
-        "cancelada": "cancelado",
+        "cancelada":   "cancelado",
+        "risco":       "⚠️ ÁREA DE RISCO",
     }
 
     linhas = [f"⚠️ {site} já visitado:"]
     for v in visitas:
         tipo = tipo_label.get(v["tipo"], v["tipo"])
-        obs = f" · {v['concluido'][:40]}" if v["concluido"] and v["concluido"] not in (".", "") else ""
+        obs  = f" · {v['concluido'][:40]}" if v["concluido"] and v["concluido"] not in (".", "") else ""
         linhas.append(f"• {v['label']} — {tipo}{obs}")
 
     return "\n".join(linhas)
@@ -960,19 +960,19 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None,
         status = status_override if status_override is not None else row_dict.get("STATUS", "")
         concluido = concluido_override if concluido_override is not None else str(row_dict.get("CONCLUIDO", "") or "")
         return [
-            str(row_dict.get("DEMANDA", "")),
+            str(row_dict.get("DEMANDA",    "")),
             str(row_dict.get("INTEGRAÇÃO", "")),
-            str(row_dict.get("SITE", "")),
-            str(row_dict.get("UF", "")),
-            str(row_dict.get("TEC", "")),
-            _coord(row_dict.get("LAT", "")),
-            _coord(row_dict.get("LONG", "")),
-            str(row_dict.get("CIDADE", "")),
-            str(row_dict.get("2G|3G|4G", "")),
-            str(row_dict.get("5G", "")),
+            str(row_dict.get("SITE",       "")),
+            str(row_dict.get("UF",         "")),
+            str(row_dict.get("TEC",        "")),
+            _coord(row_dict.get("LAT",     "")),
+            _coord(row_dict.get("LONG",    "")),
+            str(row_dict.get("CIDADE",     "")),
+            str(row_dict.get("2G|3G|4G",   "")),
+            str(row_dict.get("5G",         "")),
             str(status),
             concluido,
-            str(row_dict.get("HOTEL", "") or ""),
+            str(row_dict.get("HOTEL",      "") or ""),
         ]
 
     todas_linhas = []
@@ -982,7 +982,7 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None,
 
     for _, row in df_rota.iterrows():
         row_d = row.to_dict()
-        site = str(row_d.get("SITE", "")).upper()
+        site  = str(row_d.get("SITE", "")).upper()
 
         if site in sites_originais:
             status = row_d.get("STATUS", "")
@@ -1033,8 +1033,8 @@ def _reverse_geocode(lat, lon):
         r = requests.get(url, headers={"User-Agent": "DT3.0"}, timeout=6)
         addr = r.json().get("address", {})
         return (
-                addr.get("city") or addr.get("town")
-                or addr.get("village") or addr.get("state") or "Local"
+            addr.get("city") or addr.get("town")
+            or addr.get("village") or addr.get("state") or "Local"
         )
     except Exception:
         return "Local"
@@ -1104,15 +1104,15 @@ def determinar_ponto_inicio(df_sheets):
 # ============================================================
 
 _MAPA_COLUNAS = {
-    "SITE": ["SITE", "SITES", "SITE_ID", "COD_SITE", "NOME_SITE", "CODIGO"],
-    "CIDADE": ["CIDADE", "MUNICIPIO", "CITY", "LOCALIDADE"],
-    "UF": ["UF", "ESTADO", "STATE", "REGIONAL", "UF_SITE"],
-    "LATITUDE": ["LATITUDE", "LAT", "LATIT"],
-    "LONGITUDE": ["LONGITUDE", "LON", "LONG", "LONGIT"],
-    "FREQUENCIA": ["FREQUENCIA", "FREQUÊNCIA", "FREQ", "FREQUENCIAS", "FREQUENCY"],
-    "VENDOR": ["VENDOR", "EQUIPE_RF", "EMPRESA_RF", "FORNECEDOR", "INTEGRADOR_RF"],
+    "SITE":        ["SITE", "SITES", "SITE_ID", "COD_SITE", "NOME_SITE", "CODIGO"],
+    "CIDADE":      ["CIDADE", "MUNICIPIO", "CITY", "LOCALIDADE"],
+    "UF":          ["UF", "ESTADO", "STATE", "REGIONAL", "UF_SITE"],
+    "LATITUDE":    ["LATITUDE", "LAT", "LATIT"],
+    "LONGITUDE":   ["LONGITUDE", "LON", "LONG", "LONGIT"],
+    "FREQUENCIA":  ["FREQUENCIA", "FREQUÊNCIA", "FREQ", "FREQUENCIAS", "FREQUENCY"],
+    "VENDOR":      ["VENDOR", "EQUIPE_RF", "EMPRESA_RF", "FORNECEDOR", "INTEGRADOR_RF"],
     "INTEGRADORA": ["INTEGRADORA", "DEMANDANTE", "CLIENTE", "OPERADORA"],
-    "TECNOLOGIA": ["TECNOLOGIA", "TEC", "TECNOLOGIAS", "TECH", "TECHNOLOGY"],
+    "TECNOLOGIA":  ["TECNOLOGIA", "TEC", "TECNOLOGIAS", "TECH", "TECHNOLOGY"],
 }
 
 
@@ -1163,8 +1163,8 @@ def _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002):
     if df_base is None or df_base.empty:
         return pd.DataFrame()
     mask = (
-            (abs(df_base["LATITUDE"] - lat) <= tolerancia) &
-            (abs(df_base["LONGITUDE"] - lon) <= tolerancia)
+        (abs(df_base["LATITUDE"]  - lat) <= tolerancia) &
+        (abs(df_base["LONGITUDE"] - lon) <= tolerancia)
     )
     return df_base[mask]
 
@@ -1186,8 +1186,8 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
             continue
         site = _formatar_site_robusto(site_raw)
 
-        lat = safe_float(row[col["LATITUDE"]]) if "LATITUDE" in col else 0.0
-        lon = safe_float(row[col["LONGITUDE"]]) if "LONGITUDE" in col else 0.0
+        lat  = safe_float(row[col["LATITUDE"]])  if "LATITUDE"  in col else 0.0
+        lon  = safe_float(row[col["LONGITUDE"]]) if "LONGITUDE" in col else 0.0
         if lat == 0.0 and lon == 0.0:
             print(f"{prefixo} ⚠️  Linha {linha_num} ({site}): coordenadas zeradas — ignorada")
             descartados += 1
@@ -1224,19 +1224,19 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
             return "" if pd.isna(v) else str(v).strip()
 
         registros.append({
-            "DEMANDA": _s("INTEGRADORA"),
+            "DEMANDA":    _s("INTEGRADORA"),
             "INTEGRAÇÃO": _s("VENDOR"),
-            "SITE": site,
-            "UF": uf,
-            "TEC": tec,
-            "LAT": lat,
-            "LONG": lon,
-            "CIDADE": cidade,
-            "2G|3G|4G": freq_234,
-            "5G": freq_5g,
-            "STATUS": ST_NOVA,
-            "CONCLUIDO": "",
-            "HOTEL": "",
+            "SITE":       site,
+            "UF":         uf,
+            "TEC":        tec,
+            "LAT":        lat,
+            "LONG":       lon,
+            "CIDADE":     cidade,
+            "2G|3G|4G":  freq_234,
+            "5G":         freq_5g,
+            "STATUS":     ST_NOVA,
+            "CONCLUIDO":  "",
+            "HOTEL":      "",
         })
 
     if descartados:
@@ -1247,10 +1247,10 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
     if df_base is not None and not df_out.empty:
         for idx, row in df_out.iterrows():
             precisa_cidade = not row["CIDADE"]
-            precisa_uf = not row["UF"]
-            precisa_tec = not row["TEC"]
-            precisa_4g = not row["2G|3G|4G"]
-            precisa_5g = not row["5G"]
+            precisa_uf     = not row["UF"]
+            precisa_tec    = not row["TEC"]
+            precisa_4g     = not row["2G|3G|4G"]
+            precisa_5g     = not row["5G"]
 
             if not any([precisa_cidade, precisa_uf, precisa_tec, precisa_4g, precisa_5g]):
                 continue
@@ -1347,23 +1347,23 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
 
     for idx, row in df_atividades.iterrows():
         try:
-            demanda = str(row.get("DEMANDA", "")).strip().upper()
+            demanda    = str(row.get("DEMANDA",    "")).strip().upper()
             integracao = str(row.get("INTEGRAÇÃO", "")).strip().upper()
-            site = str(row.get("SITE", "")).strip().upper()
-            uf = str(row.get("UF", "")).strip().upper()
-            cidade = str(row.get("CIDADE", "")).strip().upper()
-            lat = safe_float(row.get("LAT", 0))
-            lon = safe_float(row.get("LONG", 0))
-            freq_234 = str(row.get("2G|3G|4G", "")).strip()
-            freq_5g = str(row.get("5G", "")).strip()
+            site       = str(row.get("SITE",       "")).strip().upper()
+            uf         = str(row.get("UF",         "")).strip().upper()
+            cidade     = str(row.get("CIDADE",     "")).strip().upper()
+            lat        = safe_float(row.get("LAT",  0))
+            lon        = safe_float(row.get("LONG", 0))
+            freq_234   = str(row.get("2G|3G|4G",   "")).strip()
+            freq_5g    = str(row.get("5G",          "")).strip()
 
             matches = pd.DataFrame()
             if cidade:
                 mask_a = df_base.apply(
                     lambda b: (
-                            float_close(lat, b["LATITUDE"])
-                            and float_close(lon, b["LONGITUDE"])
-                            and remove_acentos(cidade).lower() == remove_acentos(str(b["CIDADE"])).strip().lower()
+                        float_close(lat, b["LATITUDE"])
+                        and float_close(lon, b["LONGITUDE"])
+                        and remove_acentos(cidade).lower() == remove_acentos(str(b["CIDADE"])).strip().lower()
                     ),
                     axis=1,
                 )
@@ -1372,11 +1372,10 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
             if matches.empty:
                 matches = _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002)
 
-            pci_list = [str(int(v)) for v in matches["PCI"].dropna().unique()] if "PCI" in matches.columns else []
-            az_list = [str(int(v)) for v in
-                       matches["AZIMUTH"].dropna().unique()] if "AZIMUTH" in matches.columns else []
-            pci_str = "/".join(unique_preserve_order(pci_list))
-            az_str = "/".join(unique_preserve_order(az_list))
+            pci_list = [str(int(v)) for v in matches["PCI"].dropna().unique()]    if "PCI"     in matches.columns else []
+            az_list  = [str(int(v)) for v in matches["AZIMUTH"].dropna().unique()] if "AZIMUTH" in matches.columns else []
+            pci_str  = "/".join(unique_preserve_order(pci_list))
+            az_str   = "/".join(unique_preserve_order(az_list))
 
             if not pci_str:
                 print(f"   ⚠️  PCI não encontrado para o site {site} ({cidade}) — confira manualmente.")
@@ -1429,9 +1428,9 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
                 "--------------------------- Nome - LOGS --------------------------------------", "",
             ]
 
-            si = remove_acentos(integracao).replace(" ", "_")
-            ss = remove_acentos(site).replace(" ", "_")
-            sc = remove_acentos(cidade).replace(" ", "_")
+            si  = remove_acentos(integracao).replace(" ", "_")
+            ss  = remove_acentos(site).replace(" ", "_")
+            sc  = remove_acentos(cidade).replace(" ", "_")
             suf = remove_acentos(uf)
 
             menor_4g = _menor_banda_4g(freq_234)
@@ -1467,15 +1466,15 @@ def carregar_hoteis():
             for c in cabecalhos_raw
         ]
         col_map = {
-            "nome": next((i for i, c in enumerate(cabecalhos) if "NOME" in c), None),
+            "nome":   next((i for i, c in enumerate(cabecalhos) if "NOME"   in c), None),
             "cidade": next((i for i, c in enumerate(cabecalhos) if "CIDADE" in c), None),
-            "lat": next((i for i, c in enumerate(cabecalhos) if c.startswith("LAT")), None),
-            "lon": next((i for i, c in enumerate(cabecalhos)
-                         if c.startswith("LON") or c.startswith("LONG")), None),
-            "tel": next((i for i, c in enumerate(cabecalhos)
-                         if "TEL" in c or "FONE" in c), None),
-            "valor": next((i for i, c in enumerate(cabecalhos)
-                           if "VALOR" in c or "PRECO" in c), None),
+            "lat":    next((i for i, c in enumerate(cabecalhos) if c.startswith("LAT")), None),
+            "lon":    next((i for i, c in enumerate(cabecalhos)
+                            if c.startswith("LON") or c.startswith("LONG")), None),
+            "tel":    next((i for i, c in enumerate(cabecalhos)
+                            if "TEL" in c or "FONE" in c), None),
+            "valor":  next((i for i, c in enumerate(cabecalhos)
+                            if "VALOR" in c or "PRECO" in c), None),
         }
 
         def _cel(linha, chave):
@@ -1496,21 +1495,21 @@ def carregar_hoteis():
             if lat == 0.0 and lon == 0.0:
                 continue
             cidade = _cel(linha, "cidade")
-            tel = _cel(linha, "tel")
-            valor = _cel(linha, "valor")
+            tel    = _cel(linha, "tel")
+            valor  = _cel(linha, "valor")
             cidade = "" if cidade.upper() in ("NAN", "NONE") else cidade
-            tel = "" if tel.upper() in ("NAN", "NONE") else tel
-            valor = "" if valor.upper() in ("NAN", "NONE") else valor
+            tel    = "" if tel.upper()    in ("NAN", "NONE") else tel
+            valor  = "" if valor.upper()  in ("NAN", "NONE") else valor
             hoteis.append({
                 "nome": nome, "cidade": cidade,
-                "lat": lat, "lon": lon,
-                "tel": tel, "valor": valor,
+                "lat": lat,   "lon": lon,
+                "tel": tel,   "valor": valor,
             })
         return hoteis
 
     try:
-        client = conectar_sheets()
-        sh = client.open_by_key(HOTEIS_SHEET_ID)
+        client  = conectar_sheets()
+        sh      = client.open_by_key(HOTEIS_SHEET_ID)
         ws_h = None
         for aba in sh.worksheets():
             if aba.id == HOTEIS_GID:
@@ -1585,7 +1584,7 @@ def ler_km_hodometro(client, nome_aba=None):
     ws_km = None
     for ws in sh.worksheets():
         titulo_norm = remove_acentos(ws.title.strip().upper())
-        alvo_norm = remove_acentos(nome_aba.upper())
+        alvo_norm   = remove_acentos(nome_aba.upper())
         if titulo_norm == alvo_norm:
             ws_km = ws
             break
@@ -1610,7 +1609,7 @@ def ler_km_hodometro(client, nome_aba=None):
             cel_norm = remove_acentos(str(cel).strip().upper())
             if "DESLOCAMENTO" in cel_norm:
                 cabecalho = i
-                col_desl = j
+                col_desl  = j
                 break
         if col_desl is not None:
             break
@@ -1644,8 +1643,8 @@ def ler_km_hodometro(client, nome_aba=None):
 
 
 def gerar_mapa(
-        df_rota, lat0, lon0, cidade0, df_fixas=None,
-        df_aguardando=None, historico_meses=None, mapbox_token=None):
+df_rota, lat0, lon0, cidade0, df_fixas=None,
+               df_aguardando=None, historico_meses=None, mapbox_token=None):
     """
     Gera MAPA_ROTAS.html com Mapbox GL JS.
     Rota REAL (Directions API) para a próxima atividade pendente.
@@ -1666,14 +1665,14 @@ def gerar_mapa(
         if lat == 0 and lon == 0:
             continue
         pontos_rota.append({
-            "id": str(row.get("SITE", "")),
+            "id":     str(row.get("SITE",   "")),
             "cidade": str(row.get("CIDADE", "")),
-            "tec4g": str(row.get("2G|3G|4G", "")),
-            "tec5g": str(row.get("5G", "")),
-            "hotel": str(row.get("HOTEL", "") or ""),
-            "lat": lat,
-            "lon": lon,
-            "ordem": i,  # 0 = próxima (rota real), >0 = standby
+            "tec4g":  str(row.get("2G|3G|4G", "")),
+            "tec5g":  str(row.get("5G",     "")),
+            "hotel":  str(row.get("HOTEL",  "") or ""),
+            "lat":    lat,
+            "lon":    lon,
+            "ordem":  i,  # 0 = próxima (rota real), >0 = standby
         })
 
     pontos_fixos = []
@@ -1685,16 +1684,16 @@ def gerar_mapa(
                 continue
             status = str(row.get("STATUS", "")).strip()
             pontos_fixos.append({
-                "id": str(row.get("SITE", "")),
-                "cidade": str(row.get("CIDADE", "")),
-                "tec4g": str(row.get("2G|3G|4G", "")),
-                "tec5g": str(row.get("5G", "")),
+                "id":        str(row.get("SITE",      "")),
+                "cidade":    str(row.get("CIDADE",    "")),
+                "tec4g":     str(row.get("2G|3G|4G",  "")),
+                "tec5g":     str(row.get("5G",        "")),
                 "concluido": str(row.get("CONCLUIDO", "") or ""),
-                "hotel": str(row.get("HOTEL", "") or ""),
-                "status": status,
-                "tipo": tipo_status_mapa(status),
-                "lat": lat,
-                "lon": lon,
+                "hotel":     str(row.get("HOTEL",     "") or ""),
+                "status":    status,
+                "tipo":      tipo_status_mapa(status),
+                "lat":       lat,
+                "lon":       lon,
             })
 
     pontos_aguard = []
@@ -1705,24 +1704,24 @@ def gerar_mapa(
             if lat == 0 and lon == 0:
                 continue
             pontos_aguard.append({
-                "id": str(row.get("SITE", "")),
-                "cidade": str(row.get("CIDADE", "")),
-                "tec4g": str(row.get("2G|3G|4G", "")),
-                "tec5g": str(row.get("5G", "")),
+                "id":        str(row.get("SITE",      "")),
+                "cidade":    str(row.get("CIDADE",    "")),
+                "tec4g":     str(row.get("2G|3G|4G",  "")),
+                "tec5g":     str(row.get("5G",        "")),
                 "concluido": str(row.get("CONCLUIDO", "") or ""),
-                "hotel": str(row.get("HOTEL", "") or ""),
-                "lat": lat,
-                "lon": lon,
+                "hotel":     str(row.get("HOTEL",     "") or ""),
+                "lat":       lat,
+                "lon":       lon,
             })
 
     partida = {"lat": lat0, "lon": lon0, "cidade": cidade0}
 
-    j_rota = json.dumps(pontos_rota, ensure_ascii=False)
-    j_fixos = json.dumps(pontos_fixos, ensure_ascii=False)
+    j_rota   = json.dumps(pontos_rota,   ensure_ascii=False)
+    j_fixos  = json.dumps(pontos_fixos,  ensure_ascii=False)
     j_aguard = json.dumps(pontos_aguard, ensure_ascii=False)
-    j_hoteis = json.dumps(hoteis, ensure_ascii=False)
-    j_part = json.dumps(partida, ensure_ascii=False)
-    j_hist = json.dumps(historico_meses or {}, ensure_ascii=False)
+    j_hoteis = json.dumps(hoteis,        ensure_ascii=False)
+    j_part   = json.dumps(partida,       ensure_ascii=False)
+    j_hist   = json.dumps(historico_meses or {}, ensure_ascii=False)
 
     # ── Token Mapbox (antes do cálculo de rota e da geração do HTML) ──
     token = mapbox_token or ""
@@ -1748,8 +1747,7 @@ def gerar_mapa(
                         "duracao": round(route["duration"] / 60),
                         "geometry": route["geometry"]
                     }
-                    print(
-                        f"   ✅ Rota real calculada: {rota_real_data['distancia']} km em {rota_real_data['duracao']} min")
+                    print(f"   ✅ Rota real calculada: {rota_real_data['distancia']} km em {rota_real_data['duracao']} min")
             else:
                 print(f"   ⚠️  Directions API retornou {resp.status_code} — usando linha reta")
         except Exception as e:
@@ -1764,22 +1762,24 @@ def gerar_mapa(
     # ── Calcular estatísticas para o Dashboard ───────────────────────────
     def _stats_de_pontos(pontos_fixos_lista, pontos_rota_lista, pontos_aguard_lista):
         """Calcula estatísticas de um conjunto de atividades."""
-        concluidas = [p for p in pontos_fixos_lista if p.get("tipo") == "concluida"]
+        concluidas   = [p for p in pontos_fixos_lista if p.get("tipo") == "concluida"]
         improdutivas = [p for p in pontos_fixos_lista if p.get("tipo") == "improdutiva"]
-        canceladas = [p for p in pontos_fixos_lista if p.get("tipo") == "cancelada"]
-        pendentes = pontos_rota_lista
-        aguardando = pontos_aguard_lista
+        canceladas   = [p for p in pontos_fixos_lista if p.get("tipo") == "cancelada"]
+        risco        = [p for p in pontos_fixos_lista if p.get("tipo") == "risco"]
+        pendentes    = pontos_rota_lista
+        aguardando   = pontos_aguard_lista
 
         return {
-            "concluidas": len(concluidas),
+            "concluidas":   len(concluidas),
             "improdutivas": len(improdutivas),
-            "canceladas": len(canceladas),
-            "pendentes": len(pendentes),
-            "aguardando": len(aguardando),
-            "total": len(concluidas) + len(improdutivas) + len(canceladas),
-            "km_total": 0.0,  # será preenchido pelo hodômetro real
-            "top_maiores": [],  # será preenchido pela planilha de controle
-            "top_menores": [],  # será preenchido pela planilha de controle
+            "canceladas":   len(canceladas),
+            "risco":        len(risco),
+            "pendentes":    len(pendentes),
+            "aguardando":   len(aguardando),
+            "total":        len(concluidas) + len(improdutivas) + len(canceladas) + len(risco),
+            "km_total":     0.0,   # será preenchido pelo hodômetro real
+            "top_maiores":  [],    # será preenchido pela planilha de controle
+            "top_menores":  [],    # será preenchido pela planilha de controle
         }
 
     def _ler_deslocamentos_controle(client_km):
@@ -1794,14 +1794,14 @@ def gerar_mapa(
         ordenada pela data (ordem das linhas).
         """
         meses_pt_ctrl = [
-            "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
-            "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+            "JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
+            "JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO",
         ]
         now = datetime.now()
-        nome_aba_atual = f"{meses_pt_ctrl[now.month - 1]} - {str(now.year)[-2:]}"
+        nome_aba_atual  = f"{meses_pt_ctrl[now.month - 1]} - {str(now.year)[-2:]}"
         # Aba do mês anterior
         mes_ant_idx = now.month - 2  # 0-based
-        ano_ant = now.year if now.month > 1 else now.year - 1
+        ano_ant     = now.year if now.month > 1 else now.year - 1
         mes_ant_idx = mes_ant_idx % 12
         nome_aba_ant = f"{meses_pt_ctrl[mes_ant_idx]} - {str(ano_ant)[-2:]}"
 
@@ -1822,16 +1822,16 @@ def gerar_mapa(
             for i, linha in enumerate(dados):
                 ln = [remove_acentos(str(c).strip().upper()) for c in linha]
                 if "DIA" in ln and "DESLOCAMENTO" in ln:
-                    col_dia = next((j for j, c in enumerate(ln) if c == "DIA"), None)
-                    col_desl = next((j for j, c in enumerate(ln) if "DESLOCAMENTO" in c), None)
+                    col_dia    = next((j for j, c in enumerate(ln) if c == "DIA"), None)
+                    col_desl   = next((j for j, c in enumerate(ln) if "DESLOCAMENTO" in c), None)
                     # CIDADES é a última coluna com cabeçalho — prioridade: "CIDADE" sozinho
                     # ou "CIDADES", nunca "HORA TRABALHADA"
-                    col_local = None
+                    col_local  = None
                     for j, c in enumerate(ln):
                         if ("CIDADE" in c or c == "LOCAL") and "HORA" not in c and "TRAB" not in c:
                             col_local = j  # pega a última ocorrência (mais à direita)
-                    col_inicio = next((j for j, c in enumerate(ln)
-                                       if "INICIO" in c or "INICIO" in c), None)
+                    col_inicio  = next((j for j, c in enumerate(ln)
+                                        if "INICIO" in c or "INICIO" in c), None)
                     col_termino = next((j for j, c in enumerate(ln)
                                         if "TERMINO" in c or "TERMINO" in c or "TERM" in c), None)
                     return i, col_dia, col_desl, col_local, col_inicio, col_termino
@@ -1872,9 +1872,9 @@ def gerar_mapa(
 
                 linhas.append({
                     "dia_num": dia_val,
-                    "cidade": cidade,
-                    "km": km,
-                    "inicio": inicio,
+                    "cidade":  cidade,
+                    "km":      km,
+                    "inicio":  inicio,
                     "termino": termino,
                 })
             return linhas
@@ -1902,8 +1902,7 @@ def gerar_mapa(
                 dados_ant = ws_ant.get_all_values()
                 cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a, col_ter_a = _detectar_colunas(dados_ant)
                 if cab_a is not None:
-                    linhas_ant = _linhas_validas(dados_ant, cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a,
-                                                 col_ter_a)
+                    linhas_ant = _linhas_validas(dados_ant, cab_a, col_dia_a, col_desl_a, col_local_a, col_ini_a, col_ter_a)
                     # Última cidade preenchida do mês anterior
                     for l in reversed(linhas_ant):
                         if l["cidade"]:
@@ -1925,10 +1924,10 @@ def gerar_mapa(
             if km > 0 and cidade_chegada:
                 cidade_saida = ultima_cidade if ultima_cidade else "—"
                 deslocamentos.append({
-                    "de": cidade_saida,
-                    "para": cidade_chegada,
-                    "km": round(km, 1),
-                    "inicio": linha.get("inicio", ""),
+                    "de":      cidade_saida,
+                    "para":    cidade_chegada,
+                    "km":      round(km, 1),
+                    "inicio":  linha.get("inicio", ""),
                     "termino": linha.get("termino", ""),
                 })
 
@@ -1954,17 +1953,17 @@ def gerar_mapa(
                 pac_ant = historico_meses[ano_k][mes_k]
                 label_anterior = pac_ant.get("label", "")
                 pontos_ant = pac_ant.get("pontos", [])
-                fixos_ant = [p for p in pontos_ant if p.get("tipo") in
-                             ("concluida", "improdutiva", "cancelada")]
+                fixos_ant  = [p for p in pontos_ant if p.get("tipo") in
+                              ("concluida", "improdutiva", "cancelada")]
                 stats_anterior = _stats_de_pontos(fixos_ant, [], [])
                 break
 
     # Mês atual label
-    meses_pt = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-                "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+    meses_pt = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+                "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"]
     from datetime import datetime as _dt
     now = _dt.now()
-    label_atual = f"{meses_pt[now.month - 1]}/{now.year}"
+    label_atual = f"{meses_pt[now.month-1]}/{now.year}"
 
     # ── Km real do hodômetro (Controle Diário de Atividades) ─────────────
     # Substitui o km estimado por linha reta pelo valor real do hodômetro
@@ -1978,8 +1977,8 @@ def gerar_mapa(
         # ── Km do mês anterior para o comparativo ────────────────────────
         if stats_anterior is not None:
             meses_pt_km = [
-                "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
-                "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+                "JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
+                "JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO",
             ]
             _now = datetime.now()
             _mes_ant_idx = (_now.month - 2) % 12
@@ -2009,10 +2008,10 @@ def gerar_mapa(
         print(f"   ✅ {len(deslocamentos_reais)} deslocamentos diários lidos para o dashboard.")
 
     dash_data = {
-        "label_atual": label_atual,
+        "label_atual":    label_atual,
         "label_anterior": label_anterior,
-        "atual": stats_atual,
-        "anterior": stats_anterior,
+        "atual":          stats_atual,
+        "anterior":       stats_anterior,
     }
     j_dash = json.dumps(dash_data, ensure_ascii=False)
 
@@ -2072,6 +2071,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 .dot-conc{{background:#27ae60;}}
 .dot-impr{{background:#e74c3c;}}
 .dot-canc{{background:#7f8c8d;}}
+.dot-risco{{background:#1a0a00;border:2px solid #e74c3c;}}
 .dot-part{{background:#f39c12;border:2px solid #b7770d;}}
 .dot-hotel{{background:#e67e22;}}
 .dot-aguard{{background:#8e44ad;}}
@@ -2244,6 +2244,10 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
   100%{{transform:scale(1.55);opacity:0;}}
 }}
 @keyframes dtSpin{{to{{transform:rotate(360deg);}}}}
+@keyframes riscoGlow{{
+  0%,100%{{box-shadow:0 0 6px rgba(231,76,60,.6);}}
+  50%{{box-shadow:0 0 16px rgba(231,76,60,1),0 0 30px rgba(231,76,60,.4);}}
+}}
 
 /* ── Próxima atividade (estrela pulsante) ────────── */
 .proxima-pulse{{
@@ -2383,6 +2387,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 .kc-km  {{border-top:3px solid #0468BF;}} .kc-km .kpi-valor{{color:#0468BF;font-size:22px;}}
 .kc-canc{{border-top:3px solid #CAC8AF;}} .kc-canc .kpi-valor{{color:#888;}}
 .kc-aguard{{border-top:3px solid #78B593;}} .kc-aguard .kpi-valor{{color:#78B593;}}
+.kc-risco{{border-top:3px solid #e74c3c;background:#fff0f0;}} .kc-risco .kpi-valor{{color:#c0392b;font-size:22px;}}
 
 /* ── Barra de progresso ─── */
 .dash-section{{margin-bottom:18px;}}
@@ -2523,6 +2528,7 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
     <label class="filtro"><input type="checkbox" id="chk-conc" checked onchange="toggleCamada('conc',this.checked)"/><span class="dot dot-conc"></span> Concluídas</label>
     <label class="filtro"><input type="checkbox" id="chk-impr" checked onchange="toggleCamada('impr',this.checked)"/><span class="dot dot-impr"></span> Improdutivas</label>
     <label class="filtro"><input type="checkbox" id="chk-canc" checked onchange="toggleCamada('canc',this.checked)"/><span class="dot dot-canc"></span> Canceladas</label>
+    <label class="filtro"><input type="checkbox" id="chk-risco" checked onchange="toggleCamada('risco',this.checked)"/><span class="dot dot-risco"></span> ☠️ Área de Risco</label>
     <label class="filtro"><input type="checkbox" id="chk-hotel" onchange="toggleCamada('hotel',this.checked)"/><span class="dot dot-hotel"></span> Hotéis</label>
     <label class="filtro"><input type="checkbox" id="chk-aguard" checked onchange="toggleCamada('aguard',this.checked)"/><span class="dot dot-aguard"></span> Aguardando</label>
     <label class="filtro"><input type="checkbox" id="chk-traffic" onchange="toggleTraffic(this.checked)"/><span style="width:12px;height:12px;display:inline-block;background:linear-gradient(90deg,#27ae60,#f39c12,#e74c3c);border-radius:3px;flex-shrink:0;"></span> Trânsito</label>
@@ -2768,7 +2774,7 @@ function atualizarEtaBox(html) {{
 function desenharRotaReal(latOrig, lonOrig, proxPonto) {{
   // ✅ Rota já foi calculada no Python (1 chamada ao atualizar mapa)
   // O navegador apenas DESENHA a rota — nenhuma API call
-
+  
   if (!ROTA_REAL || !ROTA_REAL.geometry) {{
     // Fallback: linha reta se rota não foi calculada
     atualizarEtaBox(
@@ -2920,11 +2926,22 @@ function criarElPendente(ordem) {{
 }}
 
 function criarElFixo(tipo) {{
-  var cores = {{ concluida:'#27ae60', improdutiva:'#e74c3c', cancelada:'#7f8c8d' }};
-  var simbolos = {{ concluida:'✓', improdutiva:'✗', cancelada:'⊘' }};
+  var cores    = {{ concluida:'#27ae60', improdutiva:'#e74c3c', cancelada:'#7f8c8d', risco:'#1a0a00' }};
+  var simbolos = {{ concluida:'✓', improdutiva:'✗', cancelada:'⊘', risco:'☠️' }};
   var el = document.createElement('div');
-  el.style.cssText = 'width:20px;height:20px;border-radius:50%;background:' + (cores[tipo]||'#888') +
-    ';border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;font-size:11px;color:white;font-weight:700;cursor:pointer;';
+  if (tipo === 'risco') {{
+    // Marcador caveira com borda vermelha pulsante
+    el.style.cssText =
+      'width:26px;height:26px;border-radius:50%;background:#1a0a00;' +
+      'border:2px solid #e74c3c;box-shadow:0 0 8px rgba(231,76,60,.7),0 2px 6px rgba(0,0,0,.4);' +
+      'display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer;' +
+      'animation:riscoGlow 1.8s ease-in-out infinite;';
+  }} else {{
+    el.style.cssText =
+      'width:20px;height:20px;border-radius:50%;background:' + (cores[tipo]||'#888') +
+      ';border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.25);' +
+      'display:flex;align-items:center;justify-content:center;font-size:11px;color:white;font-weight:700;cursor:pointer;';
+  }}
   el.textContent = simbolos[tipo] || '?';
   return el;
 }}
@@ -3039,14 +3056,16 @@ map.on('load', function() {{
   }});
 
   // ── Fixos (concluídas, improdutivas, canceladas) ──────────
-  mkFixos = {{ conc:[], impr:[], canc:[] }};
+  mkFixos = {{ conc:[], impr:[], canc:[], risco:[] }};
   FIXOS.forEach(function(p) {{
     var el = criarElFixo(p.tipo);
     var statusHtml = p.tipo === 'concluida'
       ? '<div class="popup-status ps-conc">✓ Concluída</div>'
       : p.tipo === 'cancelada'
         ? '<div class="popup-status ps-canc">⊘ Cancelada</div>'
-        : '<div class="popup-status ps-impr">✗ Improdutiva</div>';
+        : p.tipo === 'risco'
+          ? '<div class="popup-status" style="background:#3d0000;color:#ff6b6b;font-weight:700;">☠️ ÁREA DE RISCO — Não retornar!</div>'
+          : '<div class="popup-status ps-impr">✗ Improdutiva</div>';
     var popup = new mapboxgl.Popup({{offset:20}}).setHTML(
       popupContent(p.id,
         ['<b>Cidade:</b> ' + p.cidade,
@@ -3060,11 +3079,16 @@ map.on('load', function() {{
       .setPopup(popup)
       .addTo(map);
 
-    registrarSite(p.id, mk, p.lat, p.lon, p.tipo === 'concluida' ? 'conc' : p.tipo === 'cancelada' ? 'canc' : 'impr');
+    var camada = p.tipo === 'concluida' ? 'conc'
+               : p.tipo === 'cancelada' ? 'canc'
+               : p.tipo === 'risco'     ? 'risco'
+               : 'impr';
+    registrarSite(p.id, mk, p.lat, p.lon, camada);
 
-    if (p.tipo === 'concluida') mkFixos.conc.push(mk);
-    else if (p.tipo === 'cancelada') mkFixos.canc.push(mk);
-    else mkFixos.impr.push(mk);
+    if      (p.tipo === 'concluida')   mkFixos.conc.push(mk);
+    else if (p.tipo === 'cancelada')   mkFixos.canc.push(mk);
+    else if (p.tipo === 'risco')       mkFixos.risco.push(mk);
+    else                               mkFixos.impr.push(mk);
   }});
 
   // ── Aguardando ────────────────────────────────────────────
@@ -3142,6 +3166,7 @@ function toggleCamada(nome, visivel) {{
   var lista = nome === 'conc'  ? mkFixos.conc
             : nome === 'impr'  ? mkFixos.impr
             : nome === 'canc'  ? mkFixos.canc
+            : nome === 'risco' ? mkFixos.risco
             : nome === 'hotel' ? mkHoteis
             : nome === 'aguard'? mkAguard
             : [];
@@ -3252,6 +3277,7 @@ function _tipoLabel(tipo) {{
   if (!tipo) return '';
   if (tipo === 'concluida') return '<span class="bg-rel-tipo bg-rel-conc">✓ Concluída</span>';
   if (tipo === 'cancelada')  return '<span class="bg-rel-tipo bg-rel-canc">⊘ Cancelada</span>';
+  if (tipo === 'risco')      return '<span class="bg-rel-tipo" style="background:#3d0000;color:#ff6b6b;">☠️ Área de Risco</span>';
   return '<span class="bg-rel-tipo bg-rel-impr">✗ Improdutiva</span>';
 }}
 
@@ -3588,6 +3614,7 @@ function voltarAtual() {{
   document.getElementById('chk-conc').checked  && mkFixos.conc.forEach(function(mk){{ mk.getElement().style.display=''; }});
   document.getElementById('chk-impr').checked  && mkFixos.impr.forEach(function(mk){{ mk.getElement().style.display=''; }});
   document.getElementById('chk-canc').checked  && mkFixos.canc.forEach(function(mk){{ mk.getElement().style.display=''; }});
+  document.getElementById('chk-risco').checked && mkFixos.risco.forEach(function(mk){{ mk.getElement().style.display=''; }});
   document.getElementById('chk-aguard').checked && mkAguard.forEach(function(mk){{ mk.getElement().style.display=''; }});
   mostrarAba('atual');
   atualizarContador();
@@ -3726,6 +3753,7 @@ function renderDashboard() {{
     {{ cls:'kc-km',    valor:a.km_total+' km', label: (a.km_fonte === 'hodômetro' ? 'Km reais (hodômetro)' : 'Km estimados'), delta: ant ? _delta(Math.round(a.km_total), Math.round(ant.km_total || 0)) : '' }},
     {{ cls:'kc-canc',  valor:a.canceladas,   label:'Canceladas',   delta: '' }},
     {{ cls:'kc-aguard',valor:a.aguardando,   label:'Aguardando',   delta: '' }},
+    {{ cls:'kc-risco', valor:a.risco||0,     label:'☠️ Área de Risco', delta: '' }},
   ];
 
   var kpiEl = document.getElementById('dash-kpis');
@@ -3758,6 +3786,7 @@ function renderDashboard() {{
       '<div class="comp-row"><span>Concluídas</span><b>' + stats.concluidas + '</b></div>' +
       '<div class="comp-row"><span>Improdutivas</span><b>' + stats.improdutivas + '</b></div>' +
       '<div class="comp-row"><span>Canceladas</span><b>' + stats.canceladas + '</b></div>' +
+      '<div class="comp-row"><span>☠️ Área de Risco</span><b>' + (stats.risco||0) + '</b></div>' +
       '<div class="comp-row"><span>Total visitados</span><b>' + stats.total + '</b></div>' +
       '<div class="comp-row"><span>Km percorridos</span><b>' + (stats.km_total || 0) + ' km</b></div>' +
       '</div>';
@@ -3832,7 +3861,7 @@ def _publicar_arquivo_github(api_base, headers, arquivo_remoto, conteudo_bytes, 
             return True
         else:
             print(f"   ❌ GitHub {arquivo_remoto}: status {r.status_code} — "
-                  f"{r.json().get('message', '')}")
+                  f"{r.json().get('message','')}")
             return False
     except Exception as e:
         print(f"   ❌ Erro ao publicar {arquivo_remoto}: {e}")
@@ -3852,9 +3881,9 @@ def _ofuscar_token(token):
     q = n // 4
     partes = [
         token[0:q],
-        token[q:2 * q],
-        token[2 * q:3 * q],
-        token[3 * q:],
+        token[q:2*q],
+        token[2*q:3*q],
+        token[3*q:],
     ]
     # Gera JS que remonta o token sem o string completo em lugar nenhum
     linhas = [
@@ -3881,8 +3910,8 @@ def publicar_mapa_github(html_path):
             print("   ❌ github_token.txt incompleto. Veja o GUIA_GITHUB.txt.")
             return
         gh_token = linhas[0].strip()
-        usuario = linhas[1].strip()
-        repo = linhas[2].strip()
+        usuario  = linhas[1].strip()
+        repo     = linhas[2].strip()
     except Exception as e:
         print(f"   ❌ Erro ao ler github_token.txt: {e}")
         return
@@ -3898,11 +3927,11 @@ def publicar_mapa_github(html_path):
     config_js_ofuscado = _ofuscar_token(mapbox_token).encode("utf-8")
 
     api_base = f"https://api.github.com/repos/{usuario}/{repo}"
-    headers = {
+    headers  = {
         "Authorization": f"token {gh_token}",
-        "Accept": "application/vnd.github+json",
+        "Accept":        "application/vnd.github+json",
     }
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    agora    = datetime.now().strftime("%d/%m/%Y %H:%M")
     mensagem = f"DT 3.0 — Mapa atualizado em {agora}"
 
     # ── Publicar HTML ──────────────────────────────────────────
@@ -3947,8 +3976,8 @@ def main_mapa():
     print("\n[1/3] Conectando ao Google Sheets...")
     try:
         client = conectar_sheets()
-        sheet = client.open_by_key(SHEET_ID)
-        ws = obter_aba_vigente(sheet)
+        sheet  = client.open_by_key(SHEET_ID)
+        ws     = obter_aba_vigente(sheet)
     except Exception as e:
         print(f"   ❌ Erro: {e}")
         input("\nPressione ENTER para sair...")
@@ -3958,18 +3987,18 @@ def main_mapa():
     df_sheets = ler_atividades_sheets(ws)
     print(f"   {len(df_sheets)} atividades encontradas.")
 
-    df_fixas = df_sheets[mask_status_fixos_mapa(df_sheets)].copy()
+    df_fixas      = df_sheets[mask_status_fixos_mapa(df_sheets)].copy()
     df_aguardando = df_sheets[
         df_sheets["STATUS"].str.strip() == ST_AGUARDANDO
-        ].copy()
-    df_pendentes = df_sheets[
+    ].copy()
+    df_pendentes  = df_sheets[
         ~mask_status_fixos_mapa(df_sheets) &
         (df_sheets["STATUS"].str.strip() != ST_AGUARDANDO)
-        ].copy()
-    df_pendentes = df_pendentes.dropna(subset=["LAT", "LONG"])
-    df_pendentes = df_pendentes[
+    ].copy()
+    df_pendentes  = df_pendentes.dropna(subset=["LAT", "LONG"])
+    df_pendentes  = df_pendentes[
         (df_pendentes["LAT"] != 0) & (df_pendentes["LONG"] != 0)
-        ]
+    ]
 
     print(f"   Concluídas/Improdutivas : {len(df_fixas)}")
     print(f"   Pendentes na rota       : {len(df_pendentes)}")
@@ -4038,8 +4067,8 @@ def main():
     print("\n[2/7] Conectando ao Google Sheets...")
     try:
         client = conectar_sheets()
-        sheet = client.open_by_key(SHEET_ID)
-        ws = obter_aba_vigente(sheet)
+        sheet  = client.open_by_key(SHEET_ID)
+        ws     = obter_aba_vigente(sheet)
     except Exception as e:
         print(f"   ❌ Erro: {e}")
         input("\nPressione ENTER para sair...")
@@ -4060,13 +4089,13 @@ def main():
     # ── [5/7] Novas atividades ────────────────────────────
     print("\n[5/7] Processando novas atividades...")
     arquivos_novas = encontrar_arquivos_novas()
-    df_novas = pd.DataFrame()
+    df_novas       = pd.DataFrame()
 
     if arquivos_novas:
         frames_novas = []
         for arq in arquivos_novas:
             try:
-                df_raw = pd.read_excel(arq, engine="openpyxl")
+                df_raw  = pd.read_excel(arq, engine="openpyxl")
                 df_proc = processar_arquivo(
                     df_raw, nome_arquivo=arq.name, df_base=df_base
                 )
@@ -4092,20 +4121,20 @@ def main():
 
     df_aguardando = df_sheets[
         df_sheets["STATUS"].str.strip() == ST_AGUARDANDO
-        ].copy()
+    ].copy()
 
     df_pool_sheets = df_sheets[
         ~mask_status_fixos_mapa(df_sheets) &
         (df_sheets["STATUS"].str.strip() != ST_AGUARDANDO)
-        ].copy()
+    ].copy()
     df_pool_sheets = df_pool_sheets.dropna(subset=["LAT", "LONG"])
     df_pool_sheets = df_pool_sheets[
         (df_pool_sheets["LAT"] != 0) & (df_pool_sheets["LONG"] != 0)
-        ]
+    ]
 
     # Complementar UF e TEC via Base_4G para atividades do Sheets
     for idx, row in df_pool_sheets.iterrows():
-        precisa_uf = not str(row.get("UF", "")).strip()
+        precisa_uf  = not str(row.get("UF",  "")).strip()
         precisa_tec = not str(row.get("TEC", "")).strip()
         if not (precisa_uf or precisa_tec):
             continue
@@ -4131,7 +4160,7 @@ def main():
             pass
 
     sites_originais = set(df_sheets["SITE"].str.upper())
-    sites_no_pool = set(df_pool_sheets["SITE"].str.upper())
+    sites_no_pool   = set(df_pool_sheets["SITE"].str.upper())
 
     COLS = [
         "DEMANDA", "INTEGRAÇÃO", "SITE", "UF", "TEC",
@@ -4239,14 +4268,14 @@ def main():
 # MODO AUTOMÁTICO (Task Scheduler — --auto)
 # ============================================================
 
-AUTO_HASH_PATH = BASE_DIR / ".dt30_auto_hash"  # guarda estado da última execução
+AUTO_HASH_PATH = BASE_DIR / ".dt30_auto_hash"   # guarda estado da última execução
 
 
 def _hash_atividades(df_sheets):
     """Gera hash simples do estado atual das atividades (site + status)."""
     import hashlib
     conteudo = ";".join(
-        f"{r.get('SITE', '')}:{r.get('STATUS', '')}"
+        f"{r.get('SITE','')}:{r.get('STATUS','')}"
         for _, r in df_sheets.iterrows()
     )
     return hashlib.md5(conteudo.encode()).hexdigest()
@@ -4255,7 +4284,7 @@ def _hash_atividades(df_sheets):
 def _horario_permitido():
     """Retorna True se estiver dentro de segunda–sexta, 07h–18h."""
     now = datetime.now()
-    if now.weekday() >= 5:  # 5=sábado, 6=domingo
+    if now.weekday() >= 5:          # 5=sábado, 6=domingo
         return False, f"Fim de semana ({now.strftime('%A')})"
     if not (7 <= now.hour < 18):
         return False, f"Fora do horário ({now.strftime('%H:%M')})"
@@ -4280,7 +4309,7 @@ def main_auto():
         """Salva log em dt30_auto.log na pasta do exe."""
         log_path = BASE_DIR / "dt30_auto.log"
         status = "OK" if sucesso else "ERRO"
-        cabecalho = f"\n{'=' * 55}\n{datetime.now().strftime('%d/%m/%Y %H:%M')} — {status}\n{'=' * 55}\n"
+        cabecalho = f"\n{'='*55}\n{datetime.now().strftime('%d/%m/%Y %H:%M')} — {status}\n{'='*55}\n"
         try:
             linhas_existentes = []
             if log_path.exists():
@@ -4313,8 +4342,8 @@ def main_auto():
     try:
         log("Conectando ao Google Sheets...")
         client = conectar_sheets()
-        sheet = client.open_by_key(SHEET_ID)
-        ws = obter_aba_vigente(sheet)
+        sheet  = client.open_by_key(SHEET_ID)
+        ws     = obter_aba_vigente(sheet)
         df_sheets = ler_atividades_sheets(ws)
         log(f"{len(df_sheets)} atividades lidas da planilha.")
     except Exception as e:
@@ -4346,8 +4375,8 @@ def main_auto():
     if not concluidas.empty:
         ultima = concluidas.iloc[-1]
         try:
-            lat0 = float(str(ultima["LAT"]).replace(",", "."))
-            lon0 = float(str(ultima["LONG"]).replace(",", "."))
+            lat0    = float(str(ultima["LAT"]).replace(",", "."))
+            lon0    = float(str(ultima["LONG"]).replace(",", "."))
             cidade0 = str(ultima.get("CIDADE", "")) or "Local"
             log(f"📍 Partida automática: {ultima['SITE']} — {cidade0}")
         except Exception:
@@ -4359,8 +4388,8 @@ def main_auto():
             r = requests.get("http://ip-api.com/json/", timeout=5)
             d = r.json()
             if d.get("status") == "success":
-                lat0 = d["lat"]
-                lon0 = d["lon"]
+                lat0    = d["lat"]
+                lon0    = d["lon"]
                 cidade0 = d.get("city", "Local detectado")
                 log(f"📍 Partida por IP: {cidade0} ({lat0}, {lon0})")
         except Exception:
@@ -4374,15 +4403,15 @@ def main_auto():
     df_fixas = df_sheets[mask_status_fixos_mapa(df_sheets)].copy()
     df_aguardando = df_sheets[
         df_sheets["STATUS"].str.strip() == ST_AGUARDANDO
-        ].copy()
+    ].copy()
     df_pendentes = df_sheets[
         ~mask_status_fixos_mapa(df_sheets) &
         (df_sheets["STATUS"].str.strip() != ST_AGUARDANDO)
-        ].copy()
+    ].copy()
     df_pendentes = df_pendentes.dropna(subset=["LAT", "LONG"])
     df_pendentes = df_pendentes[
         (df_pendentes["LAT"] != 0) & (df_pendentes["LONG"] != 0)
-        ]
+    ]
 
     # ── 7. Token Mapbox ───────────────────────────────────────────────────
     mapbox_token = carregar_mapbox_token()
@@ -4442,14 +4471,13 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ Erro inesperado no modo auto: {e}")
             import traceback
-
             traceback.print_exc()
             # Salvar no log mesmo em caso de crash
             log_path = BASE_DIR / "dt30_auto.log"
             try:
                 ts = datetime.now().strftime("%d/%m/%Y %H:%M")
                 log_path.open("a", encoding="utf-8").write(
-                    f"\n{'=' * 55}\n{ts} — CRASH\n{traceback.format_exc()}\n"
+                    f"\n{'='*55}\n{ts} — CRASH\n{traceback.format_exc()}\n"
                 )
             except Exception:
                 pass
@@ -4483,7 +4511,6 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"\n❌ Erro inesperado: {e}")
                 import traceback
-
                 traceback.print_exc()
                 try:
                     input("\nPressione ENTER para sair...")
@@ -4497,7 +4524,6 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"\n❌ Erro inesperado: {e}")
                 import traceback
-
                 traceback.print_exc()
                 try:
                     input("\nPressione ENTER para sair...")
