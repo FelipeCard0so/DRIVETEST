@@ -1,5 +1,5 @@
 """
-DT 3.0 - Automação Drive Test
+DT 3.2.3 - Automação Drive Test
 Organiza atividades, otimiza rota, atualiza Google Sheets,
 gera relatórios e mapa em um único processo.
 VERSÃO MAPBOX: Rotas reais com trânsito para próxima atividade.
@@ -8,6 +8,7 @@ VERSÃO MAPBOX: Rotas reais com trânsito para próxima atividade.
 import os
 import sys
 import re
+import json
 import math
 import unicodedata
 import requests
@@ -1642,6 +1643,46 @@ def ler_km_hodometro(client, nome_aba=None):
     return km_total
 
 
+MAPBOX_USO_PATH = BASE_DIR / "mapbox_uso.json"
+MAPBOX_LIMITE   = 600
+
+
+def _chave_mes_uso():
+    now = datetime.now()
+    return f"{now.year}_{now.month}"
+
+
+def ler_uso_mapbox():
+    """Lê o uso atual do mês do arquivo mapbox_uso.json."""
+    try:
+        if MAPBOX_USO_PATH.exists():
+            data = json.loads(MAPBOX_USO_PATH.read_text(encoding="utf-8"))
+            return data.get(_chave_mes_uso(), 0)
+    except Exception:
+        pass
+    return 0
+
+
+def incrementar_uso_mapbox():
+    """Incrementa o contador de uso e salva. Retorna o novo total."""
+    try:
+        data = {}
+        if MAPBOX_USO_PATH.exists():
+            data = json.loads(MAPBOX_USO_PATH.read_text(encoding="utf-8"))
+        chave = _chave_mes_uso()
+        data[chave] = data.get(chave, 0) + 1
+        # Manter apenas os últimos 3 meses para não crescer infinitamente
+        meses_ord = sorted(data.keys(), reverse=True)
+        data = {k: data[k] for k in meses_ord[:3]}
+        MAPBOX_USO_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return data[chave]
+    except Exception as e:
+        print(f"   ⚠️  Erro ao salvar uso Mapbox: {e}")
+        return 0
+
+
 def gerar_mapa(
 df_rota, lat0, lon0, cidade0, df_fixas=None,
                df_aguardando=None, historico_meses=None, mapbox_token=None):
@@ -1716,18 +1757,39 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
 
     partida = {"lat": lat0, "lon": lon0, "cidade": cidade0}
 
+    # ── Identificar hotel da noite ────────────────────────────────────────
+    # Pega o nome do hotel da última atividade concluída antes de uma linha
+    # vazia ou >> EM DESLOCAMENTO — esse é o hotel onde Felipe está hospedado
+    hotel_noite = ""
+    if df_fixas is not None and not df_fixas.empty:
+        # Percorrer de baixo para cima nas concluídas
+        df_conc = df_fixas[df_fixas["STATUS"].apply(
+            lambda s: "CONCLUID" in remove_acentos(str(s).upper())
+        )].copy()
+        # Pegar o hotel da última linha concluída que tenha hotel preenchido
+        for _, row in df_conc.iloc[::-1].iterrows():
+            h = str(row.get("HOTEL", "") or "").strip()
+            if h and h not in (".", "-", "nan"):
+                hotel_noite = h
+                break
+
+    if hotel_noite:
+        print(f"   🏨 Hotel da noite identificado: {hotel_noite}")
+
     j_rota   = json.dumps(pontos_rota,   ensure_ascii=False)
     j_fixos  = json.dumps(pontos_fixos,  ensure_ascii=False)
     j_aguard = json.dumps(pontos_aguard, ensure_ascii=False)
     j_hoteis = json.dumps(hoteis,        ensure_ascii=False)
     j_part   = json.dumps(partida,       ensure_ascii=False)
     j_hist   = json.dumps(historico_meses or {}, ensure_ascii=False)
+    j_hotel_noite = json.dumps(hotel_noite, ensure_ascii=False)
 
     # ── Token Mapbox (antes do cálculo de rota e da geração do HTML) ──
     token = mapbox_token or ""
 
     # ── Calcular ROTA REAL no Python (1 chamada Directions API) ─────
     rota_real_data = {"distancia": 0, "duracao": 0, "geometry": None}
+    uso_mapbox_atual = ler_uso_mapbox()   # lê antes de qualquer chamada
 
     if pontos_rota and token:
         try:
@@ -1739,15 +1801,21 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
             )
             resp = requests.get(url_directions, timeout=15)
             if resp.status_code == 200:
-                data = resp.json()
-                if data.get("routes"):
-                    route = data["routes"][0]
+                data_dir = resp.json()
+                if data_dir.get("routes"):
+                    route = data_dir["routes"][0]
                     rota_real_data = {
                         "distancia": round(route["distance"] / 1000, 1),
                         "duracao": round(route["duration"] / 60),
                         "geometry": route["geometry"]
                     }
+                    # ✅ Incrementar contador real
+                    uso_mapbox_atual = incrementar_uso_mapbox()
+                    restante = MAPBOX_LIMITE - uso_mapbox_atual
                     print(f"   ✅ Rota real calculada: {rota_real_data['distancia']} km em {rota_real_data['duracao']} min")
+                    print(f"   📊 Uso Mapbox: {uso_mapbox_atual}/{MAPBOX_LIMITE} chamadas este mês ({restante} restantes)")
+                    if restante <= 100:
+                        print(f"   ⚠️  ATENÇÃO: apenas {restante} chamadas Mapbox restantes!")
             else:
                 print(f"   ⚠️  Directions API retornou {resp.status_code} — usando linha reta")
         except Exception as e:
@@ -1757,7 +1825,12 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     else:
         print("   ℹ️  Sem atividades pendentes — rota vazia")
 
-    j_rota_real = json.dumps(rota_real_data, ensure_ascii=False)
+    j_rota_real  = json.dumps(rota_real_data, ensure_ascii=False)
+    j_uso_mapbox = json.dumps({
+        "uso":     uso_mapbox_atual,
+        "limite":  MAPBOX_LIMITE,
+        "restante": MAPBOX_LIMITE - uso_mapbox_atual,
+    })
 
     # ── Calcular estatísticas para o Dashboard ───────────────────────────
     def _stats_de_pontos(pontos_fixos_lista, pontos_rota_lista, pontos_aguard_lista):
@@ -2074,6 +2147,21 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 .dot-risco{{background:#1a0a00;border:2px solid #e74c3c;}}
 .dot-part{{background:#f39c12;border:2px solid #b7770d;}}
 .dot-hotel{{background:#e67e22;}}
+
+/* ── Hotel da noite — animação destaque ── */
+@keyframes hotelPulse{{
+  0%,100%{{box-shadow:0 0 0 0 rgba(230,126,34,.7), 0 2px 8px rgba(0,0,0,.3);transform:scale(1);}}
+  50%{{box-shadow:0 0 0 10px rgba(230,126,34,.0), 0 2px 8px rgba(0,0,0,.3);transform:scale(1.12);}}
+}}
+.hotel-noite-marker{{
+  width:34px;height:34px;border-radius:50%;
+  background:linear-gradient(135deg,#e67e22,#f39c12);
+  border:3px solid #fff;
+  display:flex;align-items:center;justify-content:center;
+  font-size:18px;cursor:pointer;
+  animation:hotelPulse 2s ease-in-out infinite;
+  box-shadow:0 0 0 0 rgba(230,126,34,.7), 0 2px 8px rgba(0,0,0,.3);
+}}
 .dot-aguard{{background:#8e44ad;}}
 
 /* ── ETA Box ────────────────────────────────────── */
@@ -2561,31 +2649,20 @@ var FIXOS         = {j_fixos};
 var AGUARD        = {j_aguard};
 var HOTEIS        = {j_hoteis};
 var ANTERIORES    = {j_hist};
-var DASH_STATS    = {j_dash};  // ← Estatísticas para o dashboard
+var DASH_STATS    = {j_dash};
+var USO_MAPBOX    = {j_uso_mapbox};  // ← Contagem real (Python, não localStorage)
+var HOTEL_NOITE   = {j_hotel_noite};  // ← Hotel da noite (última atividade concluída)
 
 // ══════════════════════════════════════════════════════════════
-// CONTROLE DE QUOTA MAPBOX (persistido em localStorage)
-// Limite: 600 Directions API/mês  |  Alerta: ≤ 100 restantes
+// CONTROLE DE QUOTA MAPBOX (dados reais — calculados no Python)
+// Contador persistido em mapbox_uso.json na pasta do .exe
+// Reseta automaticamente a cada mês (chave ano_mes)
 // ══════════════════════════════════════════════════════════════
-var LIMITE_QUOTA  = 600;
+var LIMITE_QUOTA  = USO_MAPBOX.limite;
 var ALERTA_QUOTA  = 100;
 
-function _chaveQuota() {{
-  var d = new Date();
-  return 'mapbox_uso_' + d.getFullYear() + '_' + (d.getMonth() + 1);
-}}
-
 function lerUso() {{
-  var v = parseInt(localStorage.getItem(_chaveQuota()) || '0', 10);
-  return isNaN(v) ? 0 : v;
-}}
-
-function incrementarUso() {{
-  var uso = lerUso() + 1;
-  localStorage.setItem(_chaveQuota(), uso.toString());
-  atualizarBadgeQuota(uso);
-  verificarAlertaQuota(uso);
-  return uso;
+  return USO_MAPBOX.uso;
 }}
 
 function atualizarBadgeQuota(uso) {{
@@ -2593,7 +2670,7 @@ function atualizarBadgeQuota(uso) {{
   var restante = LIMITE_QUOTA - uso;
   if (restante > ALERTA_QUOTA) {{
     badge.className = 'ok';
-    badge.textContent = 'Mapbox: ' + uso + '/' + LIMITE_QUOTA + ' chamadas usadas';
+    badge.textContent = 'Mapbox: ' + uso + '/' + LIMITE_QUOTA + ' chamadas este mês';
   }} else if (restante > 0) {{
     badge.className = 'aviso';
     badge.textContent = '⚠️ Mapbox: ' + restante + ' chamadas restantes!';
@@ -2608,14 +2685,12 @@ function verificarAlertaQuota(uso) {{
   var box = document.getElementById('quota-box-inner');
   var titulo = document.getElementById('quota-titulo');
   var msg = document.getElementById('quota-msg');
-
   if (restante <= 0) {{
     box.className = 'quota-box critico';
     titulo.textContent = '❌ Quota Mapbox Esgotada';
     msg.innerHTML =
       'Você atingiu o limite de <strong>' + LIMITE_QUOTA + ' chamadas</strong> este mês.<br><br>' +
-      'O mapa continuará funcionando normalmente, porém <strong>sem rotas reais</strong> até o próximo mês.<br><br>' +
-      'Renova em: <strong>' + proximoDia1() + '</strong><br><br>' +
+      'O mapa continuará funcionando, porém <strong>sem rotas reais</strong> até o próximo mês.<br><br>' +
       '<a href="https://account.mapbox.com/billing/overview/" target="_blank">Ver conta Mapbox</a>';
     mostrarPopupQuota();
   }} else if (restante <= ALERTA_QUOTA) {{
@@ -2623,16 +2698,9 @@ function verificarAlertaQuota(uso) {{
     titulo.textContent = '⚠️ Atenção: Quota Baixa';
     msg.innerHTML =
       'Você usou <strong>' + uso + '</strong> de <strong>' + LIMITE_QUOTA + '</strong> chamadas Mapbox este mês.<br><br>' +
-      'Restam apenas <strong>' + restante + ' chamadas</strong>.<br>' +
-      'Renova em: <strong>' + proximoDia1() + '</strong>';
+      'Restam apenas <strong>' + restante + ' chamadas</strong>.';
     mostrarPopupQuota();
   }}
-}}
-
-function proximoDia1() {{
-  var d = new Date();
-  var prox = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-  return prox.toLocaleDateString('pt-BR');
 }}
 
 function mostrarPopupQuota() {{
@@ -2644,9 +2712,8 @@ function fecharPopupQuota() {{
 }}
 
 function quotaEsgotada() {{
-  return lerUso() >= LIMITE_QUOTA;
+  return USO_MAPBOX.uso >= LIMITE_QUOTA;
 }}
-
 // ══════════════════════════════════════════════════════════════
 // INIT MAPBOX
 // ══════════════════════════════════════════════════════════════
@@ -3111,21 +3178,49 @@ map.on('load', function() {{
   }});
 
   // ── Hotéis ────────────────────────────────────────────────
+  // ── Hotéis ───────────────────────────────────────────────
+  // Hotel da noite: visível e animado automaticamente
+  // Demais hotéis: ocultos por padrão (controlados pelo checkbox)
+  var normHotelNoite = HOTEL_NOITE
+    ? HOTEL_NOITE.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    : '';
+
   HOTEIS.forEach(function(h) {{
-    var el = criarElHotel();
-    el.style.display = 'none';   // oculto por padrão — checkbox desmarcado
+    var nomeNorm = (h.nome||'').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    var ehNoite  = normHotelNoite && nomeNorm === normHotelNoite;
+
+    var el;
+    if (ehNoite) {{
+      // Marcador especial animado para o hotel da noite
+      el = document.createElement('div');
+      el.className = 'hotel-noite-marker';
+      el.textContent = '🏨';
+    }} else {{
+      el = criarElHotel();
+      el.style.display = 'none';   // demais ocultos por padrão
+    }}
+
+    var popupExtra = ehNoite
+      ? '<div class="popup-status" style="background:#fef3e2;color:#b7600a;">🌙 Hotel desta noite</div>'
+      : '<div class="popup-status" style="background:#fef3e2;color:#b7600a;">🏨 Hotel / Pousada</div>';
+
     var popup = new mapboxgl.Popup({{offset:20}}).setHTML(
       popupContent(h.nome,
         ['<b>Cidade:</b> ' + (h.cidade||'—'),
-         h.tel   ? '<b>Tel:</b> '    + h.tel   : '',
-         h.valor ? '<b>Valor:</b> R$ '+ h.valor : ''],
-        '<div class="popup-status" style="background:#fef3e2;color:#b7600a;">🏨 Hotel / Pousada</div>', null)
+         h.tel   ? '<b>Tel:</b> '     + h.tel   : '',
+         h.valor ? '<b>Valor:</b> R$ ' + h.valor : ''],
+        popupExtra, null)
     );
+
     var mk = new mapboxgl.Marker({{element:el, anchor:'center'}})
       .setLngLat([h.lon, h.lat])
       .setPopup(popup)
       .addTo(map);
+
     mkHoteis.push(mk);
+
+    // Guardar referência do hotel da noite para não sumir no toggleCamada
+    if (ehNoite) mk._ehHotelNoite = true;
   }});
 
   // ── Linhas guia standby ───────────────────────────────────
@@ -3171,6 +3266,8 @@ function toggleCamada(nome, visivel) {{
             : nome === 'aguard'? mkAguard
             : [];
   lista.forEach(function(mk) {{
+    // Hotel da noite nunca some — sempre visível independente do checkbox
+    if (mk._ehHotelNoite) return;
     mk.getElement().style.display = visivel ? '' : 'none';
   }});
 }}
