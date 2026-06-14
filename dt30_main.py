@@ -10,6 +10,8 @@ import sys
 import re
 import json
 import math
+import time
+import hashlib
 import unicodedata
 import requests
 import pandas as pd
@@ -17,6 +19,14 @@ import gspread
 from pathlib import Path
 from datetime import datetime
 from google.oauth2.service_account import Credentials
+
+try:
+    from tqdm import tqdm as _tqdm
+    _TQDM_OK = True
+except ImportError:
+    _TQDM_OK = False
+    def _tqdm(iterable, **kwargs):  # fallback silencioso
+        return iterable
 
 
 # ============================================================
@@ -29,18 +39,49 @@ def get_base_dir():
     return Path(os.path.abspath(__file__)).parent
 
 
+# ── Configuração externa ────────────────────────────────────────────────────
+def _carregar_config() -> dict:
+    """
+    Lê config.json do mesmo diretório do executável.
+    Retorna dict vazio se o arquivo não existir — o código usa os defaults hardcoded.
+    """
+    _cfg_path = get_base_dir() / "config.json"
+    if _cfg_path.exists():
+        try:
+            with open(_cfg_path, encoding="utf-8") as _f:
+                _cfg = json.load(_f)
+            print(f"   ✅ config.json carregado ({len(_cfg)} chaves)")
+            return _cfg
+        except Exception as _e:
+            print(f"   ⚠️  config.json inválido ({_e}) — usando defaults internos.")
+    return {}
+
+CFG = _carregar_config()
+
 BASE_DIR           = get_base_dir()
 PASTA_NOVAS        = BASE_DIR / "novas atividades"
 PASTA_OUT          = BASE_DIR / "out"
 BASE_4G_PATH       = BASE_DIR / "Base_4G.xlsx"
 CREDS_PATH         = BASE_DIR / "credentials.json"
-SHEET_ID           = "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE"
 GITHUB_TOKEN_PATH  = BASE_DIR / "github_token.txt"
 HOTEIS_PATH        = BASE_DIR / "HOTEIS.xlsx"
-HOTEIS_SHEET_ID    = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
-HOTEIS_GID         = 965678690
 MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"
-CONTROLE_KM_ID     = "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k"  # Controle Diário de Atividades
+CACHE_DIST_PATH    = BASE_DIR / "cache_distancias.json"
+
+# Constantes — lidas do config.json, com fallback para os valores originais
+SHEET_ID         = CFG.get("sheet_id",        "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE")
+HOTEIS_SHEET_ID  = CFG.get("hoteis_sheet_id", "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk")
+HOTEIS_GID       = CFG.get("hoteis_gid",       965678690)
+CONTROLE_KM_ID   = CFG.get("controle_km_id",  "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k")
+MAPBOX_LIMITE    = CFG.get("mapbox_limite_mes", 600)
+
+# Timeouts (usados nas funções de HTTP — bloco 2 vai consumi-los)
+CFG_TIMEOUT_GEOCODE = CFG.get("timeout_geocode", 6)
+CFG_TIMEOUT_MAPBOX  = CFG.get("timeout_mapbox",  15)
+CFG_TIMEOUT_GITHUB  = CFG.get("timeout_github",  30)
+CFG_TIMEOUT_IP      = CFG.get("timeout_ip",       5)
+CFG_RETRY_MAX       = CFG.get("retry_max_tentativas", 3)
+CFG_RETRY_BACKOFF   = CFG.get("retry_backoff_base",   2)
 
 # Status da planilha
 ST_CONCLUIDO    = "✓ Atividade concluída"
@@ -51,6 +92,9 @@ ST_NOVA         = "Nova Atividade"
 ST_INICIADA     = "Atividade iniciada"
 ST_RISCO        = "ÁREA DE RISCO"
 STATUS_FIXOS    = {ST_CONCLUIDO, ST_IMPRODUTIVO}
+
+# ── Modo de execução ────────────────────────────────────────────────────────
+DRY_RUN: bool = False  # Setado para True pelo menu opção [3]
 
 # Colunas da planilha (índice 0)
 CI = {
@@ -74,8 +118,116 @@ ORDEM_BANDA_4G = [700, 850, 900, 1800, 2100, 2300, 2600]
 
 
 # ============================================================
-# UTILITÁRIOS
+# HTTP ROBUSTO COM RETRY + BACKOFF
 # ============================================================
+
+def _http_get(url: str, timeout: int = 15, headers: dict = None,
+              max_tentativas: int = None, label: str = "") -> "requests.Response | None":
+    """
+    GET com retry exponencial. Retorna o Response em sucesso, None após esgotar tentativas.
+    Trata: Timeout, ConnectionError, status 429 (rate limit), 5xx (erro servidor).
+    NÃO trata: 4xx (erros de cliente — problema no código, não na rede).
+    """
+    max_t = max_tentativas or CFG_RETRY_MAX
+    for tentativa in range(max_t):
+        try:
+            r = requests.get(url, headers=headers or {}, timeout=timeout)
+            if r.status_code == 200:
+                return r
+            if r.status_code in (429, 500, 502, 503, 504):
+                espera = CFG_RETRY_BACKOFF ** tentativa
+                print(f"   ⚠️  {label or 'HTTP GET'} status {r.status_code} "
+                      f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
+                time.sleep(espera)
+                continue
+            # Status inesperado (ex: 401, 403, 404) — não adianta retry
+            print(f"   ❌ {label or 'HTTP GET'} retornou {r.status_code} — sem retry.")
+            return r
+        except requests.Timeout:
+            espera = CFG_RETRY_BACKOFF ** tentativa
+            print(f"   ⏱️  {label or 'HTTP GET'} timeout "
+                  f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
+            time.sleep(espera)
+        except requests.ConnectionError as e:
+            espera = CFG_RETRY_BACKOFF ** tentativa
+            print(f"   🔌 {label or 'HTTP GET'} conexão falhou ({e}) "
+                  f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
+            time.sleep(espera)
+    print(f"   ❌ {label or 'HTTP GET'} falhou após {max_t} tentativas.")
+    return None
+
+
+def _http_put(url: str, payload: dict, timeout: int = 30,
+              headers: dict = None, max_tentativas: int = None,
+              label: str = "") -> "requests.Response | None":
+    """
+    PUT com retry. Mesma lógica do _http_get.
+    """
+    max_t = max_tentativas or CFG_RETRY_MAX
+    for tentativa in range(max_t):
+        try:
+            r = requests.put(url, headers=headers or {}, json=payload, timeout=timeout)
+            if r.status_code in (200, 201):
+                return r
+            if r.status_code in (429, 500, 502, 503, 504):
+                espera = CFG_RETRY_BACKOFF ** tentativa
+                print(f"   ⚠️  {label or 'HTTP PUT'} status {r.status_code} "
+                      f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
+                time.sleep(espera)
+                continue
+            print(f"   ❌ {label or 'HTTP PUT'} retornou {r.status_code} — sem retry.")
+            return r
+        except (requests.Timeout, requests.ConnectionError) as e:
+            espera = CFG_RETRY_BACKOFF ** tentativa
+            print(f"   ⚠️  {label or 'HTTP PUT'} erro ({e}) "
+                  f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
+            time.sleep(espera)
+    print(f"   ❌ {label or 'HTTP PUT'} falhou após {max_t} tentativas.")
+    return None
+
+
+
+# ============================================================
+# CACHE DE MATRIZ DE DISTÂNCIAS
+# ============================================================
+
+def _gerar_chave_cache(pontos: list) -> str:
+    """
+    Gera chave SHA-256 baseada nas coordenadas dos pontos.
+    `pontos` é uma lista de dicts com chaves 'lat', 'lon', 'site'.
+    Ordenado por 'site' para ser determinístico.
+    """
+    dados = sorted(
+        [(str(p.get("site", "")), round(p.get("lat", 0), 6), round(p.get("lon", 0), 6))
+         for p in pontos]
+    )
+    raw = json.dumps(dados, ensure_ascii=False)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _ler_cache_distancias() -> dict:
+    """Lê cache salvo em disco. Retorna dict vazio se não existir ou estiver corrompido."""
+    if CACHE_DIST_PATH.exists():
+        try:
+            with open(CACHE_DIST_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _salvar_cache_distancias(chave: str, resultado: dict) -> None:
+    """Salva resultado no cache com a chave gerada."""
+    cache = _ler_cache_distancias()
+    cache["chave"]     = chave
+    cache["resultado"] = resultado
+    cache["timestamp"] = datetime.now().isoformat()
+    try:
+        with open(CACHE_DIST_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"   ⚠️  Não foi possível salvar cache de distâncias: {e}")
+
 
 def remove_acentos(texto):
     return unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('ASCII')
@@ -88,6 +240,34 @@ def safe_float(value):
         return float(str(value).replace(',', '.'))
     except Exception:
         return 0.0
+
+
+def extrair_nome_hotel(celula):
+    """
+    Extrai apenas o nome do hotel da célula da planilha ATIVIDADES.
+    Remove o valor monetário e a palavra 'pila' do final.
+    'Hotel São Pedro 110 pila'  → 'Hotel São Pedro'
+    'zinho plaza hotel 120 pila' → 'zinho plaza hotel'
+    'Pousada das Gerais 90 pila' → 'Pousada das Gerais'
+    """
+    s = str(celula or "").strip()
+    # Remove número (inteiro ou decimal com , ou .) seguido de 'pila' no final
+    s = re.sub(r'\s*\d+[\.,]?\d*\s*pila\s*$', '', s, flags=re.IGNORECASE)
+    # Remove 'pila' sozinho no final (sem número)
+    s = re.sub(r'\s*pila\s*$', '', s.strip(), flags=re.IGNORECASE)
+    return s.strip()
+
+
+def _match_hotel(nome_atividades, nome_hoteis):
+    """
+    Compara nome do hotel extraído da planilha ATIVIDADES com o da planilha HOTEIS.
+    Normaliza acentos e usa comparação parcial bidirecional.
+    """
+    a = remove_acentos(str(nome_atividades or "").upper()).strip()
+    b = remove_acentos(str(nome_hoteis or "").upper()).strip()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
 
 
 def float_close(a, b, eps=1e-4):
@@ -666,7 +846,11 @@ def otimizar_rota(df_pool, lat0, lon0):
     for _, r in df_pool.iterrows():
         pontos_inicio.append((r["LAT"], r["LONG"]))
 
-    for i, (la, lo) in enumerate(pontos_inicio):
+    for i, (la, lo) in enumerate(_tqdm(pontos_inicio,
+                                       desc="🗺️  Otimizando rota",
+                                       unit="combo",
+                                       ncols=70,
+                                       colour="cyan")):
         rota_c = vizinho_mais_proximo(df_pool, la, lo)
         d_c = distancia_total(rota_c, lat0, lon0)
         if d_c < melhor_d:
@@ -1011,12 +1195,19 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None,
 
     end_row = DATA_START_ROW + len(todas_linhas) - 1
     range_ref = f"A{DATA_START_ROW}:M{end_row}"
-    ws.update(values=todas_linhas, range_name=range_ref, value_input_option="USER_ENTERED")
+
+    if DRY_RUN:
+        print(f"   [DRY-RUN] Escreveria {len(todas_linhas)} linhas em {range_ref}")
+    else:
+        ws.update(values=todas_linhas, range_name=range_ref, value_input_option="USER_ENTERED")
 
     dados_atuais = ws.get_all_values()
     ultima_linha_com_dados = len(dados_atuais)
     if ultima_linha_com_dados > end_row:
-        ws.batch_clear([f"A{end_row + 1}:M{ultima_linha_com_dados}"])
+        if DRY_RUN:
+            print(f"   [DRY-RUN] Limparia linhas de {end_row + 1} até {ultima_linha_com_dados}")
+        else:
+            ws.batch_clear([f"A{end_row + 1}:M{ultima_linha_com_dados}"])
 
     print(f"   ✅ {len(todas_linhas)} linhas gravadas no Google Sheets.")
 
@@ -1031,7 +1222,11 @@ def _reverse_geocode(lat, lon):
             f"https://nominatim.openstreetmap.org/reverse"
             f"?format=json&lat={lat}&lon={lon}&zoom=10"
         )
-        r = requests.get(url, headers={"User-Agent": "DT3.0"}, timeout=6)
+        r = _http_get(url, timeout=CFG_TIMEOUT_GEOCODE,
+                     headers={"User-Agent": "DT3.0"},
+                     label="Geocodificação")
+        if r is None:
+            return "Local"
         addr = r.json().get("address", {})
         return (
             addr.get("city") or addr.get("town")
@@ -1085,14 +1280,16 @@ def determinar_ponto_inicio(df_sheets):
                 print("   ⚠️  Entrada inválida. Tentando detecção por IP...")
 
     try:
-        r = requests.get("http://ip-api.com/json/", timeout=5)
-        d = r.json()
-        if d.get("status") == "success":
-            lat = d["lat"]
-            lon = d["lon"]
-            cidade = d.get("city") or d.get("regionName") or "Local detectado"
-            print(f"   Localização detectada: {cidade} ({lat}, {lon})")
-            return lat, lon, cidade
+        r = _http_get("http://ip-api.com/json/", timeout=CFG_TIMEOUT_IP,
+                     label="IP-API")
+        if r is not None:
+            d = r.json()
+            if d.get("status") == "success":
+                lat = d["lat"]
+                lon = d["lon"]
+                cidade = d.get("city") or d.get("regionName") or "Local detectado"
+                print(f"   Localização detectada: {cidade} ({lat}, {lon})")
+                return lat, lon, cidade
     except Exception:
         pass
 
@@ -1177,7 +1374,12 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
     registros = []
     descartados = 0
 
-    for idx, row in df_raw.iterrows():
+    for idx, row in _tqdm(df_raw.iterrows(),
+                         desc="📂 Processando atividades",
+                         unit="arq",
+                         ncols=70,
+                         colour="green",
+                         total=len(df_raw)):
         linha_num = idx + 2
 
         site_raw = str(row[col["SITE"]]).strip() if "SITE" in col else ""
@@ -1477,6 +1679,8 @@ def carregar_hoteis():
             "valor":  next((i for i, c in enumerate(cabecalhos)
                             if "VALOR" in c or "PRECO" in c), None),
         }
+        print(f"   🔍 HOTEIS cabeçalhos: {cabecalhos}")
+        print(f"   🔍 HOTEIS col_map: {col_map}")
 
         def _cel(linha, chave):
             idx = col_map.get(chave)
@@ -1644,7 +1848,6 @@ def ler_km_hodometro(client, nome_aba=None):
 
 
 MAPBOX_USO_PATH = BASE_DIR / "mapbox_uso.json"
-MAPBOX_LIMITE   = 600
 
 
 def _chave_mes_uso():
@@ -1758,23 +1961,37 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     partida = {"lat": lat0, "lon": lon0, "cidade": cidade0}
 
     # ── Identificar hotel da noite ────────────────────────────────────────
-    # Pega o nome do hotel da última atividade concluída antes de uma linha
-    # vazia ou >> EM DESLOCAMENTO — esse é o hotel onde Felipe está hospedado
-    hotel_noite = ""
+    # Lê coluna HOTEL da última atividade concluída.
+    # Remove valor e "pila" do texto (ex: "Hotel São Pedro 110 pila" → "Hotel São Pedro").
+    # Compara com planilha HOTEIS para usar lat/lon cadastradas.
+    hotel_noite_raw  = ""   # texto bruto da célula
+    hotel_noite_nome = ""   # nome limpo para matching e para o JS
+
     if df_fixas is not None and not df_fixas.empty:
-        # Percorrer de baixo para cima nas concluídas
         df_conc = df_fixas[df_fixas["STATUS"].apply(
             lambda s: "CONCLUID" in remove_acentos(str(s).upper())
         )].copy()
-        # Pegar o hotel da última linha concluída que tenha hotel preenchido
         for _, row in df_conc.iloc[::-1].iterrows():
             h = str(row.get("HOTEL", "") or "").strip()
             if h and h not in (".", "-", "nan"):
-                hotel_noite = h
+                hotel_noite_raw  = h
+                hotel_noite_nome = extrair_nome_hotel(h)
                 break
 
-    if hotel_noite:
-        print(f"   🏨 Hotel da noite identificado: {hotel_noite}")
+    hotel_noite = hotel_noite_nome   # passa nome limpo para o JS
+
+    if hotel_noite_nome:
+        print(f"   🏨 Hotel da noite: '{hotel_noite_raw}' → nome limpo: '{hotel_noite_nome}'")
+        match_h = next(
+            (h for h in hoteis if _match_hotel(hotel_noite_nome, h.get("nome", ""))),
+            None
+        )
+        if match_h:
+            print(f"   ✅ Match HOTEIS: '{match_h['nome']}' — "
+                  f"lat={match_h['lat']}, lon={match_h['lon']} | {match_h['cidade']}")
+        else:
+            print(f"   ⚠️  Sem match na planilha HOTEIS para '{hotel_noite_nome}'")
+            print(f"      Verifique se o nome na coluna HOTEL bate com a planilha HOTEIS")
 
     j_rota   = json.dumps(pontos_rota,   ensure_ascii=False)
     j_fixos  = json.dumps(pontos_fixos,  ensure_ascii=False)
@@ -1799,8 +2016,9 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
                 f"{lon0},{lat0};{prox['lon']},{prox['lat']}"
                 f"?access_token={token}&geometries=geojson&overview=full"
             )
-            resp = requests.get(url_directions, timeout=15)
-            if resp.status_code == 200:
+            resp = _http_get(url_directions, timeout=CFG_TIMEOUT_MAPBOX,
+                           label="Mapbox Directions")
+            if resp is not None and resp.status_code == 200:
                 data_dir = resp.json()
                 if data_dir.get("routes"):
                     route = data_dir["routes"][0]
@@ -2150,17 +2368,18 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 
 /* ── Hotel da noite — animação destaque ── */
 @keyframes hotelPulse{{
-  0%,100%{{box-shadow:0 0 0 0 rgba(230,126,34,.7), 0 2px 8px rgba(0,0,0,.3);transform:scale(1);}}
-  50%{{box-shadow:0 0 0 10px rgba(230,126,34,.0), 0 2px 8px rgba(0,0,0,.3);transform:scale(1.12);}}
+  0%  {{box-shadow:0 0 0 0   rgba(230,126,34,.8), 0 2px 8px rgba(0,0,0,.3);}}
+  50% {{box-shadow:0 0 0 10px rgba(230,126,34,.0), 0 2px 8px rgba(0,0,0,.3);}}
+  100%{{box-shadow:0 0 0 0   rgba(230,126,34,.8), 0 2px 8px rgba(0,0,0,.3);}}
 }}
 .hotel-noite-marker{{
-  width:34px;height:34px;border-radius:50%;
-  background:linear-gradient(135deg,#e67e22,#f39c12);
+  width:22px;height:22px;border-radius:50%;
+  background:#e67e22;
   border:3px solid #fff;
   display:flex;align-items:center;justify-content:center;
-  font-size:18px;cursor:pointer;
-  animation:hotelPulse 2s ease-in-out infinite;
-  box-shadow:0 0 0 0 rgba(230,126,34,.7), 0 2px 8px rgba(0,0,0,.3);
+  font-size:12px;cursor:pointer;
+  animation:hotelPulse 1.8s ease-in-out infinite;
+  will-change:box-shadow;
 }}
 .dot-aguard{{background:#8e44ad;}}
 
@@ -3182,24 +3401,37 @@ map.on('load', function() {{
   // Hotel da noite: visível e animado automaticamente
   // Demais hotéis: ocultos por padrão (controlados pelo checkbox)
   var normHotelNoite = HOTEL_NOITE
-    ? HOTEL_NOITE.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    ? HOTEL_NOITE.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ +/g,' ')
     : '';
 
   HOTEIS.forEach(function(h) {{
-    var nomeNorm = (h.nome||'').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-    var ehNoite  = normHotelNoite && nomeNorm === normHotelNoite;
+    var nomeNorm = (h.nome||'').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ +/g,' ');
+    // Comparação flexível: igual, ou um contém o outro
+    var ehNoite = normHotelNoite && nomeNorm && (
+      nomeNorm === normHotelNoite ||
+      nomeNorm.indexOf(normHotelNoite) !== -1 ||
+      normHotelNoite.indexOf(nomeNorm) !== -1
+    );
 
     var el;
     if (ehNoite) {{
-      // Marcador especial animado para o hotel da noite
-      el = document.createElement('div');
-      el.className = 'hotel-noite-marker';
-      el.textContent = '🏨';
+      // Guard: só criar marcador animado se lat/lon forem válidos
+      if (!h.lat || !h.lon || h.lat === 0 || h.lon === 0) {{
+        console.warn('[HOTEL NOITE] lat/lon inválidos para:', h.nome, h.lat, h.lon);
+        el = criarElHotel();
+        el.style.display = 'none';
+      }} else {{
+        el = document.createElement('div');
+        el.className = 'hotel-noite-marker';
+        el.textContent = '🏨';
+        console.log('[HOTEL NOITE] marcador em lat:', h.lat, 'lon:', h.lon, 'nome:', h.nome);
+      }}
     }} else {{
       el = criarElHotel();
       el.style.display = 'none';   // demais ocultos por padrão
     }}
 
+    var valorStr = h.valor ? h.valor.toString().replace('R$','').replace('R$','').trim() : '';
     var popupExtra = ehNoite
       ? '<div class="popup-status" style="background:#fef3e2;color:#b7600a;">🌙 Hotel desta noite</div>'
       : '<div class="popup-status" style="background:#fef3e2;color:#b7600a;">🏨 Hotel / Pousada</div>';
@@ -3207,8 +3439,8 @@ map.on('load', function() {{
     var popup = new mapboxgl.Popup({{offset:20}}).setHTML(
       popupContent(h.nome,
         ['<b>Cidade:</b> ' + (h.cidade||'—'),
-         h.tel   ? '<b>Tel:</b> '     + h.tel   : '',
-         h.valor ? '<b>Valor:</b> R$ ' + h.valor : ''],
+         h.tel      ? '<b>Tel:</b> '      + h.tel    : '',
+         valorStr   ? '<b>Valor:</b> R$ ' + valorStr : ''],
         popupExtra, null)
     );
 
@@ -3935,14 +4167,19 @@ function renderDashboard() {{
 
 def _publicar_arquivo_github(api_base, headers, arquivo_remoto, conteudo_bytes, mensagem):
     """Publica ou atualiza um único arquivo no GitHub. Retorna True se OK."""
+    if DRY_RUN:
+        print(f"   [DRY-RUN] Publicaria {arquivo_remoto} no GitHub")
+        return True
+
     import base64
     conteudo_b64 = base64.b64encode(conteudo_bytes).decode("utf-8")
     api_url = f"{api_base}/contents/{arquivo_remoto}"
 
     sha_atual = None
     try:
-        r = requests.get(api_url, headers=headers, timeout=10)
-        if r.status_code == 200:
+        r = _http_get(api_url, timeout=CFG_TIMEOUT_GITHUB,
+                     headers=headers, label="GitHub GET")
+        if r is not None and r.status_code == 200:
             sha_atual = r.json().get("sha")
     except Exception as e:
         print(f"   ❌ Erro ao consultar {arquivo_remoto}: {e}")
@@ -3953,8 +4190,9 @@ def _publicar_arquivo_github(api_base, headers, arquivo_remoto, conteudo_bytes, 
         payload["sha"] = sha_atual
 
     try:
-        r = requests.put(api_url, headers=headers, json=payload, timeout=30)
-        if r.status_code in (200, 201):
+        r = _http_put(api_url, payload, timeout=CFG_TIMEOUT_GITHUB,
+                     headers=headers, label="GitHub PUT")
+        if r is not None and r.status_code in (200, 201):
             return True
         else:
             print(f"   ❌ GitHub {arquivo_remoto}: status {r.status_code} — "
@@ -4102,6 +4340,10 @@ def main_mapa():
     print(f"   Aguardando              : {len(df_aguardando)}")
 
     lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets)
+
+    print("\n[2.5] Verificando qualidade dos dados...")
+    hoteis = carregar_hoteis()
+    _alertas_qualidade(df_sheets, hoteis)
 
     print("\n[3/3] Gerando mapa e publicando...")
     print("   → Carregando histórico de meses anteriores...")
@@ -4298,6 +4540,11 @@ def main():
     rota_final.to_excel(ativ_path, index=False)
     print(f"   ATIVIDADES_GERADAS.xlsx salvo.")
 
+    # ── [6.5] Alertas de qualidade ────────────────────────────
+    print("\n[6.5] Verificando qualidade dos dados...")
+    hoteis = carregar_hoteis()
+    _alertas_qualidade(df_sheets, hoteis)
+
     # ── [7/7] Gerar saídas ────────────────────────────────
     print("\n[7/7] Gerando saídas...")
 
@@ -4482,13 +4729,15 @@ def main_auto():
     if lat0 is None or lat0 == 0.0:
         # Fallback: tentar geolocalização por IP
         try:
-            r = requests.get("http://ip-api.com/json/", timeout=5)
-            d = r.json()
-            if d.get("status") == "success":
-                lat0    = d["lat"]
-                lon0    = d["lon"]
-                cidade0 = d.get("city", "Local detectado")
-                log(f"📍 Partida por IP: {cidade0} ({lat0}, {lon0})")
+            r = _http_get("http://ip-api.com/json/", timeout=CFG_TIMEOUT_IP,
+                         label="IP-API (auto)")
+            if r is not None:
+                d = r.json()
+                if d.get("status") == "success":
+                    lat0    = d["lat"]
+                    lon0    = d["lon"]
+                    cidade0 = d.get("city", "Local detectado")
+                    log(f"📍 Partida por IP: {cidade0} ({lat0}, {lon0})")
         except Exception:
             pass
 
@@ -4556,8 +4805,139 @@ def main_auto():
 
 
 # ============================================================
-# PONTO DE ENTRADA
+# ALERTAS DE QUALIDADE DE DADOS
 # ============================================================
+
+def _alertas_qualidade(df_atividades, hoteis: list = None) -> int:
+    """
+    Inspeciona df_atividades e lista de hoteis e imprime alertas de qualidade.
+    Retorna número de alertas (para opcional blocking).
+    Não levanta exceções — apenas informa. O processamento continua normalmente.
+    """
+    if hoteis is None:
+        hoteis = []
+
+    alertas = []
+
+    # ── Atividades ──────────────────────────────────────────────────────────
+    STATUS_CONHECIDOS = {
+        "✓ Atividade concluída", "IMPRODUTIVO", ">> EM DESLOCAMENTO",
+        "Aguardando para deslocar", "Nova Atividade",
+        "Atividade iniciada", "ÁREA DE RISCO", "CANCELADA", ""
+    }
+
+    for idx, row in df_atividades.iterrows():
+        site   = str(row.get("SITE", f"linha {idx+2}")).strip()
+        status = str(row.get("STATUS", "")).strip()
+        lat    = safe_float(row.get("LAT",  0))
+        lon    = safe_float(row.get("LONG", 0))
+
+        if lat == 0 and lon == 0 and status not in ("", ">> EM DESLOCAMENTO"):
+            alertas.append(f"   ⚠️  {site}: coordenadas 0,0 — será ignorado no mapa")
+
+        if status and status not in STATUS_CONHECIDOS:
+            alertas.append(f"   ⚠️  {site}: status desconhecido → '{status}'")
+
+        # Hotel informado na planilha mas sem match na planilha HOTEIS
+        hotel_celula = str(row.get("HOTEL", "")).strip()
+        if hotel_celula and hotel_celula not in (".", "-", "nan", ""):
+            hotel_nome = extrair_nome_hotel(hotel_celula)
+            if hoteis and hotel_nome:
+                # Verificar se há match (fuzzy)
+                encontrou = False
+                for h in hoteis:
+                    if _match_hotel(hotel_nome, h.get("nome", "")):
+                        encontrou = True
+                        break
+                if not encontrou:
+                    alertas.append(
+                        f"   ⚠️  {site}: hotel '{hotel_nome}' "
+                        f"não encontrado na planilha HOTEIS"
+                    )
+
+    # ── Hotéis ──────────────────────────────────────────────────────────────
+    for h in hoteis:
+        nome = h.get("nome", "?")
+        if not h.get("lat") or not h.get("lon"):
+            alertas.append(f"   ⚠️  Hotel '{nome}': sem coordenadas — não aparecerá no mapa")
+        if not h.get("valor"):
+            alertas.append(f"   ⚠️  Hotel '{nome}': sem ULTIMO_VALOR cadastrado")
+        if not h.get("tel"):
+            alertas.append(f"   ⚠️  Hotel '{nome}': sem telefone cadastrado")
+
+    # ── Relatório ────────────────────────────────────────────────────────────
+    if alertas:
+        print(f"\n  📋 ALERTAS DE QUALIDADE ({len(alertas)} item(ns)):")
+        for a in alertas:
+            print(a)
+        print()
+    else:
+        print("  ✅ Qualidade dos dados: nenhum problema encontrado.\n")
+
+    return len(alertas)
+
+
+# ============================================================
+# VALIDAÇÃO EARLY DE AMBIENTE
+# ============================================================
+
+def _validar_ambiente() -> bool:
+    """
+    Verifica pré-requisitos críticos antes de qualquer processamento.
+    Retorna True se tudo OK, False se algo crítico estiver faltando.
+    Imprime relatório formatado independente do resultado.
+    """
+    print("  Verificando ambiente...")
+    erros   = []
+    avisos  = []
+
+    # Arquivos obrigatórios
+    arquivos_criticos = {
+        "Google credentials": CREDS_PATH,
+        "Mapbox token":       MAPBOX_TOKEN_PATH,
+        "GitHub token":       GITHUB_TOKEN_PATH,
+    }
+    for nome, path in arquivos_criticos.items():
+        if not path.exists():
+            erros.append(f"Arquivo não encontrado: {path.name}  ({nome})")
+        else:
+            print(f"   ✅ {nome}: {path.name}")
+
+    # config.json (não crítico — só avisa)
+    if not (BASE_DIR / "config.json").exists():
+        avisos.append("config.json ausente — usando defaults internos (OK)")
+
+    # Valida JSON do credentials.json (detecta arquivo corrompido)
+    if CREDS_PATH.exists():
+        try:
+            with open(CREDS_PATH, encoding="utf-8") as f:
+                _cred = json.load(f)
+            if "client_email" not in _cred:
+                erros.append("credentials.json inválido — chave 'client_email' ausente")
+        except Exception as e:
+            erros.append(f"credentials.json corrompido: {e}")
+
+    # Valida que o token Mapbox não está vazio
+    if MAPBOX_TOKEN_PATH.exists():
+        _tok = MAPBOX_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        if not _tok or len(_tok) < 20:
+            erros.append("mapbox_token.txt vazio ou muito curto — token inválido")
+
+    # Relatório final
+    for a in avisos:
+        print(f"   ⚠️  {a}")
+    for e in erros:
+        print(f"   ❌ {e}")
+
+    if erros:
+        print()
+        print("  ❌ Ambiente inválido. Corrija os erros acima e tente novamente.")
+        return False
+
+    print("  ✅ Ambiente validado com sucesso.\n")
+    return True
+
+
 
 if __name__ == "__main__":
 
@@ -4580,6 +4960,14 @@ if __name__ == "__main__":
                 pass
         sys.exit(0)
 
+    # ── Validação early de credenciais ────────────────────────────────────
+    if not _validar_ambiente():
+        try:
+            input("  Pressione ENTER para sair...")
+        except Exception:
+            pass
+        sys.exit(1)
+
     # ── Modo interativo (execução manual) ────────────────────────────────
     print("\n" + "=" * 60)
     print("  DT 3.0 — Automação Drive Test")
@@ -4595,10 +4983,14 @@ if __name__ == "__main__":
     print("      Lê status atuais do Sheets e gera novo")
     print("      mapa sem reprocessar nada mais.")
     print()
+    print("  [3] Dry-run (simulação)")
+    print("      Execução completa SEM gravar em Sheets")
+    print("      e SEM publicar no GitHub. Apenas log.")
+    print()
 
     while True:
         try:
-            opcao = input("  Digite 1 ou 2: ").strip()
+            opcao = input("  Digite 1, 2 ou 3: ").strip()
         except Exception:
             opcao = "1"
 
@@ -4628,5 +5020,22 @@ if __name__ == "__main__":
                     pass
             break
 
+        elif opcao == "3":
+            # DRY_RUN já é global — não precisa declarar com type annotation
+            import __main__
+            __main__.DRY_RUN = True
+            print("\n  ⚠️  MODO DRY-RUN ATIVO — nenhum dado será gravado.\n")
+            try:
+                main()
+            except Exception as e:
+                print(f"\n❌ Erro inesperado: {e}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    input("\nPressione ENTER para sair...")
+                except Exception:
+                    pass
+            break
+
         else:
-            print("  ⚠️  Opção inválida. Digite 1 ou 2.")
+            print("  ⚠️  Opção inválida. Digite 1, 2 ou 3.")
