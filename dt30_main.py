@@ -10,8 +10,6 @@ import sys
 import re
 import json
 import math
-import time
-import hashlib
 import unicodedata
 import requests
 import pandas as pd
@@ -19,14 +17,6 @@ import gspread
 from pathlib import Path
 from datetime import datetime
 from google.oauth2.service_account import Credentials
-
-try:
-    from tqdm import tqdm as _tqdm
-    _TQDM_OK = True
-except ImportError:
-    _TQDM_OK = False
-    def _tqdm(iterable, **kwargs):  # fallback silencioso
-        return iterable
 
 
 # ============================================================
@@ -39,62 +29,31 @@ def get_base_dir():
     return Path(os.path.abspath(__file__)).parent
 
 
-# ── Configuração externa ────────────────────────────────────────────────────
-def _carregar_config() -> dict:
-    """
-    Lê config.json do mesmo diretório do executável.
-    Retorna dict vazio se o arquivo não existir — o código usa os defaults hardcoded.
-    """
-    _cfg_path = get_base_dir() / "config.json"
-    if _cfg_path.exists():
-        try:
-            with open(_cfg_path, encoding="utf-8") as _f:
-                _cfg = json.load(_f)
-            print(f"   ✅ config.json carregado ({len(_cfg)} chaves)")
-            return _cfg
-        except Exception as _e:
-            print(f"   ⚠️  config.json inválido ({_e}) — usando defaults internos.")
-    return {}
-
-CFG = _carregar_config()
-
 BASE_DIR           = get_base_dir()
 PASTA_NOVAS        = BASE_DIR / "novas atividades"
 PASTA_OUT          = BASE_DIR / "out"
 BASE_4G_PATH       = BASE_DIR / "Base_4G.xlsx"
+BASE_4G_CACHE_PATH = BASE_DIR / ".base_4g_cache.pkl"
 CREDS_PATH         = BASE_DIR / "credentials.json"
+SHEET_ID           = "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE"
 GITHUB_TOKEN_PATH  = BASE_DIR / "github_token.txt"
 HOTEIS_PATH        = BASE_DIR / "HOTEIS.xlsx"
+HOTEIS_SHEET_ID    = "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk"
+HOTEIS_GID         = 965678690
 MAPBOX_TOKEN_PATH  = BASE_DIR / "mapbox_token.txt"
-CACHE_DIST_PATH    = BASE_DIR / "cache_distancias.json"
-
-# Constantes — lidas do config.json, com fallback para os valores originais
-SHEET_ID         = CFG.get("sheet_id",        "1gPrzFOvPG6bF88H54ChXoyUmTWm84XU_ifFVO9X3rPE")
-HOTEIS_SHEET_ID  = CFG.get("hoteis_sheet_id", "1Vw1cgSppfxezM8MGRv56E88pnD-im5ThNX2LkJTyDsk")
-HOTEIS_GID       = CFG.get("hoteis_gid",       965678690)
-CONTROLE_KM_ID   = CFG.get("controle_km_id",  "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k")
-MAPBOX_LIMITE    = CFG.get("mapbox_limite_mes", 600)
-
-# Timeouts (usados nas funções de HTTP — bloco 2 vai consumi-los)
-CFG_TIMEOUT_GEOCODE = CFG.get("timeout_geocode", 6)
-CFG_TIMEOUT_MAPBOX  = CFG.get("timeout_mapbox",  15)
-CFG_TIMEOUT_GITHUB  = CFG.get("timeout_github",  30)
-CFG_TIMEOUT_IP      = CFG.get("timeout_ip",       5)
-CFG_RETRY_MAX       = CFG.get("retry_max_tentativas", 3)
-CFG_RETRY_BACKOFF   = CFG.get("retry_backoff_base",   2)
+CONTROLE_KM_ID     = "1HL5SorM-a3gScR53BcBs_wYw6XFj3uYLsmUkT-Cyu8k"  # Controle Diário de Atividades
 
 # Status da planilha
 ST_CONCLUIDO    = "✓ Atividade concluída"
 ST_IMPRODUTIVO  = "IMPRODUTIVO"
+ST_CANCELADO    = "CANCELADO"
 ST_DESLOCAMENTO = ">> EM DESLOCAMENTO"
 ST_AGUARDANDO   = "Aguardando para deslocar"
 ST_NOVA         = "Nova Atividade"
 ST_INICIADA     = "Atividade iniciada"
 ST_RISCO        = "ÁREA DE RISCO"
 STATUS_FIXOS    = {ST_CONCLUIDO, ST_IMPRODUTIVO}
-
-# ── Modo de execução ────────────────────────────────────────────────────────
-DRY_RUN: bool = False  # Setado para True pelo menu opção [3]
+CONCLUIDO_INDOOR = "SITE INDOOR"
 
 # Colunas da planilha (índice 0)
 CI = {
@@ -118,116 +77,8 @@ ORDEM_BANDA_4G = [700, 850, 900, 1800, 2100, 2300, 2600]
 
 
 # ============================================================
-# HTTP ROBUSTO COM RETRY + BACKOFF
+# UTILITÁRIOS
 # ============================================================
-
-def _http_get(url: str, timeout: int = 15, headers: dict = None,
-              max_tentativas: int = None, label: str = "") -> "requests.Response | None":
-    """
-    GET com retry exponencial. Retorna o Response em sucesso, None após esgotar tentativas.
-    Trata: Timeout, ConnectionError, status 429 (rate limit), 5xx (erro servidor).
-    NÃO trata: 4xx (erros de cliente — problema no código, não na rede).
-    """
-    max_t = max_tentativas or CFG_RETRY_MAX
-    for tentativa in range(max_t):
-        try:
-            r = requests.get(url, headers=headers or {}, timeout=timeout)
-            if r.status_code == 200:
-                return r
-            if r.status_code in (429, 500, 502, 503, 504):
-                espera = CFG_RETRY_BACKOFF ** tentativa
-                print(f"   ⚠️  {label or 'HTTP GET'} status {r.status_code} "
-                      f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
-                time.sleep(espera)
-                continue
-            # Status inesperado (ex: 401, 403, 404) — não adianta retry
-            print(f"   ❌ {label or 'HTTP GET'} retornou {r.status_code} — sem retry.")
-            return r
-        except requests.Timeout:
-            espera = CFG_RETRY_BACKOFF ** tentativa
-            print(f"   ⏱️  {label or 'HTTP GET'} timeout "
-                  f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
-            time.sleep(espera)
-        except requests.ConnectionError as e:
-            espera = CFG_RETRY_BACKOFF ** tentativa
-            print(f"   🔌 {label or 'HTTP GET'} conexão falhou ({e}) "
-                  f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
-            time.sleep(espera)
-    print(f"   ❌ {label or 'HTTP GET'} falhou após {max_t} tentativas.")
-    return None
-
-
-def _http_put(url: str, payload: dict, timeout: int = 30,
-              headers: dict = None, max_tentativas: int = None,
-              label: str = "") -> "requests.Response | None":
-    """
-    PUT com retry. Mesma lógica do _http_get.
-    """
-    max_t = max_tentativas or CFG_RETRY_MAX
-    for tentativa in range(max_t):
-        try:
-            r = requests.put(url, headers=headers or {}, json=payload, timeout=timeout)
-            if r.status_code in (200, 201):
-                return r
-            if r.status_code in (429, 500, 502, 503, 504):
-                espera = CFG_RETRY_BACKOFF ** tentativa
-                print(f"   ⚠️  {label or 'HTTP PUT'} status {r.status_code} "
-                      f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
-                time.sleep(espera)
-                continue
-            print(f"   ❌ {label or 'HTTP PUT'} retornou {r.status_code} — sem retry.")
-            return r
-        except (requests.Timeout, requests.ConnectionError) as e:
-            espera = CFG_RETRY_BACKOFF ** tentativa
-            print(f"   ⚠️  {label or 'HTTP PUT'} erro ({e}) "
-                  f"— tentativa {tentativa+1}/{max_t}, aguardando {espera}s...")
-            time.sleep(espera)
-    print(f"   ❌ {label or 'HTTP PUT'} falhou após {max_t} tentativas.")
-    return None
-
-
-
-# ============================================================
-# CACHE DE MATRIZ DE DISTÂNCIAS
-# ============================================================
-
-def _gerar_chave_cache(pontos: list) -> str:
-    """
-    Gera chave SHA-256 baseada nas coordenadas dos pontos.
-    `pontos` é uma lista de dicts com chaves 'lat', 'lon', 'site'.
-    Ordenado por 'site' para ser determinístico.
-    """
-    dados = sorted(
-        [(str(p.get("site", "")), round(p.get("lat", 0), 6), round(p.get("lon", 0), 6))
-         for p in pontos]
-    )
-    raw = json.dumps(dados, ensure_ascii=False)
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def _ler_cache_distancias() -> dict:
-    """Lê cache salvo em disco. Retorna dict vazio se não existir ou estiver corrompido."""
-    if CACHE_DIST_PATH.exists():
-        try:
-            with open(CACHE_DIST_PATH, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _salvar_cache_distancias(chave: str, resultado: dict) -> None:
-    """Salva resultado no cache com a chave gerada."""
-    cache = _ler_cache_distancias()
-    cache["chave"]     = chave
-    cache["resultado"] = resultado
-    cache["timestamp"] = datetime.now().isoformat()
-    try:
-        with open(CACHE_DIST_PATH, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"   ⚠️  Não foi possível salvar cache de distâncias: {e}")
-
 
 def remove_acentos(texto):
     return unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('ASCII')
@@ -314,6 +165,32 @@ def carregar_mapbox_token():
         print(f"   ⚠️  mapbox_token.txt não encontrado em: {BASE_DIR}")
         print("      Crie o arquivo e cole seu Access Token do Mapbox.")
     return None
+
+
+def carregar_base_4g():
+    """Carrega a Base 4G usando um cache local, quando ela não mudou.
+
+    Abrir XLSX grande pelo openpyxl é lento. O cache mantém exatamente o mesmo
+    DataFrame em formato binário e é invalidado por tamanho/data do XLSX.
+    """
+    origem = BASE_4G_PATH.stat()
+    assinatura = (origem.st_size, origem.st_mtime_ns)
+
+    try:
+        cache = pd.read_pickle(BASE_4G_CACHE_PATH)
+        if cache.get("assinatura") == assinatura and isinstance(cache.get("dados"), pd.DataFrame):
+            print("   Base 4G carregada do cache local.")
+            return cache["dados"]
+    except Exception:
+        pass
+
+    df_base = pd.read_excel(BASE_4G_PATH, engine="openpyxl")
+    try:
+        pd.to_pickle({"assinatura": assinatura, "dados": df_base}, BASE_4G_CACHE_PATH)
+        print("   Cache local da Base 4G criado/atualizado.")
+    except Exception as e:
+        print(f"   ⚠️  Não foi possível criar o cache da Base 4G: {e}")
+    return df_base
 
 
 # ============================================================
@@ -846,11 +723,7 @@ def otimizar_rota(df_pool, lat0, lon0):
     for _, r in df_pool.iterrows():
         pontos_inicio.append((r["LAT"], r["LONG"]))
 
-    for i, (la, lo) in enumerate(_tqdm(pontos_inicio,
-                                       desc="🗺️  Otimizando rota",
-                                       unit="combo",
-                                       ncols=70,
-                                       colour="cyan")):
+    for i, (la, lo) in enumerate(pontos_inicio):
         rota_c = vizinho_mais_proximo(df_pool, la, lo)
         d_c = distancia_total(rota_c, lat0, lon0)
         if d_c < melhor_d:
@@ -1082,6 +955,196 @@ def ler_atividades_sheets(ws):
     return pd.DataFrame(registros)
 
 
+def _chave_aba_mensal(nome_aba):
+    """Converte nomes como 'AGOSTO/2026' em uma chave cronológica."""
+    titulo = remove_acentos(str(nome_aba).strip()).upper()
+    match = re.match(r"^([A-Z]+)\s*/\s*(20\d{2})$", titulo)
+    if not match:
+        return None
+    meses = {remove_acentos(nome).upper(): indice + 1 for indice, nome in enumerate(MESES_MAPA)}
+    mes_nome, ano = match.groups()
+    if mes_nome not in meses:
+        return None
+    return int(ano), meses[mes_nome]
+
+
+def buscar_ultima_atividade_finalizada(df_atual, sheet=None, aba_atual_nome=None):
+    """Retorna a última atividade finalizada do mês atual ou de meses anteriores.
+
+    O fallback é usado principalmente na virada do mês, quando a nova aba ainda
+    não possui uma atividade concluída, cancelada, improdutiva ou de risco.
+    """
+    status_finalizados = {ST_CONCLUIDO, ST_IMPRODUTIVO, ST_CANCELADO, ST_RISCO}
+
+    def ultima_valida(df):
+        if df is None or df.empty or "STATUS" not in df.columns:
+            return None
+        candidatas = df[df["STATUS"].isin(status_finalizados)].copy()
+        candidatas = candidatas.dropna(subset=["LAT", "LONG"])
+        candidatas = candidatas[(candidatas["LAT"] != 0) & (candidatas["LONG"] != 0)]
+        return candidatas.iloc[-1] if not candidatas.empty else None
+
+    ultima = ultima_valida(df_atual)
+    if ultima is not None:
+        return ultima, None
+
+    if sheet is None:
+        return None, None
+
+    chave_atual = _chave_aba_mensal(aba_atual_nome or "")
+    abas_anteriores = []
+    for ws_mes in sheet.worksheets():
+        chave = _chave_aba_mensal(ws_mes.title)
+        if chave and (chave_atual is None or chave < chave_atual):
+            abas_anteriores.append((chave, ws_mes))
+
+    for _, ws_mes in sorted(abas_anteriores, key=lambda item: item[0], reverse=True):
+        try:
+            ultima = ultima_valida(ler_atividades_sheets(ws_mes))
+        except Exception as e:
+            print(f"   ⚠️  Não foi possível consultar a aba {ws_mes.title}: {e}")
+            continue
+        if ultima is not None:
+            return ultima, ws_mes.title
+
+    return None, None
+
+
+def carregar_controle_relatorio(client, inicio=datetime(2025, 5, 1)):
+    """Carrega os registros diários da planilha de controle desde maio/2025."""
+    meses = [
+        "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
+        "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
+    ]
+    hoje = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        sheet = client.open_by_key(CONTROLE_KM_ID)
+    except Exception as exc:
+        print(f"   ⚠️  Relatório: não foi possível abrir o controle diário — {exc}")
+        return []
+
+    registros = []
+    meses_relatorio = {}
+    for ws in sheet.worksheets():
+        titulo = remove_acentos(str(ws.title).strip().upper())
+        match = re.match(r"^([A-Z]+)\s*-\s*(\d{2}|20\d{2})$", titulo)
+        if not match:
+            continue
+        mes_nome, ano_texto = match.groups()
+        if mes_nome not in [remove_acentos(m) for m in meses]:
+            continue
+        mes_num = next(i + 1 for i, nome in enumerate(meses) if remove_acentos(nome) == mes_nome)
+        ano_num = int(ano_texto)
+        if ano_num < 100:
+            ano_num += 2000
+        primeiro_dia = datetime(ano_num, mes_num, 1)
+        if primeiro_dia < inicio.replace(day=1) or primeiro_dia > hoje.replace(day=1):
+            continue
+
+        chave_mes = f"{ano_num:04d}-{mes_num:02d}"
+        meses_relatorio.setdefault(chave_mes, {
+            "mes": chave_mes,
+            "label": f"{meses[mes_num - 1].upper()}/ {ano_num}",
+            "total_deslocamento": "",
+            "total_hora": "",
+            "observacoes": "",
+            "registros": [],
+        })
+
+        try:
+            dados = ws.get_all_values()
+        except Exception as exc:
+            print(f"   ⚠️  Relatório: não foi possível ler a aba {ws.title} — {exc}")
+            continue
+
+        cab = col_dia = col_semana = col_km_saida = col_inicio = col_almoco = None
+        col_km_chegada = col_termino = col_desl = col_hora_trabalhada = col_local = None
+        for indice, linha in enumerate(dados):
+            normalizada = [remove_acentos(str(c).strip().upper()) for c in linha]
+            if "DIA" in normalizada and "DESLOCAMENTO" in normalizada:
+                cab = indice
+                col_dia = normalizada.index("DIA")
+                col_semana = next((j for j, c in enumerate(normalizada) if "SEMANA" in c), None)
+                col_km_saida = next((j for j, c in enumerate(normalizada) if "KM" in c and "SAIDA" in c), None)
+                col_almoco = next((j for j, c in enumerate(normalizada) if "ALMOCO" in c), None)
+                col_km_chegada = next((j for j, c in enumerate(normalizada) if "KM" in c and "CHEGADA" in c), None)
+                col_desl = next((j for j, c in enumerate(normalizada) if "DESLOCAMENTO" in c), None)
+                col_hora_trabalhada = next((j for j, c in enumerate(normalizada) if "HORA" in c and "TRABALHADA" in c), None)
+                for j, coluna in enumerate(normalizada):
+                    if coluna in ("CIDADE", "CIDADES", "LOCAL"):
+                        col_local = j
+                if col_local is None:
+                    candidatos = [
+                        j for j, coluna in enumerate(normalizada)
+                        if j > (col_hora_trabalhada or 0) and coluna
+                    ]
+                    col_local = max(candidatos) if candidatos else None
+                col_inicio = next((j for j, c in enumerate(normalizada) if "INICIO" in c), None)
+                col_termino = next((j for j, c in enumerate(normalizada) if "TERMINO" in c or "TERM" in c), None)
+                break
+        if cab is None or col_dia is None:
+            continue
+
+        for linha in dados[cab + 1:]:
+            if col_dia >= len(linha):
+                continue
+            dia_texto = str(linha[col_dia]).strip()
+            if not dia_texto.isdigit():
+                linha_texto = " ".join(str(c).strip() for c in linha if str(c).strip())
+                if "OBSERV" in remove_acentos(linha_texto).upper():
+                    meses_relatorio[chave_mes]["observacoes"] = re.sub(
+                        r"OBSERVA[CÇ]ÕES?\s*:?", "", linha_texto, flags=re.IGNORECASE
+                    ).strip()
+                elif (
+                    (col_desl is not None and col_desl < len(linha) and str(linha[col_desl]).strip())
+                    or (col_hora_trabalhada is not None and col_hora_trabalhada < len(linha) and str(linha[col_hora_trabalhada]).strip())
+                ):
+                    if col_desl is not None and col_desl < len(linha):
+                        meses_relatorio[chave_mes]["total_deslocamento"] = str(linha[col_desl]).strip()
+                    if col_hora_trabalhada is not None and col_hora_trabalhada < len(linha):
+                        meses_relatorio[chave_mes]["total_hora"] = str(linha[col_hora_trabalhada]).strip()
+                continue
+            try:
+                data_registro = datetime(ano_num, mes_num, int(dia_texto))
+            except ValueError:
+                continue
+            if data_registro < inicio or data_registro > hoje:
+                continue
+
+            deslocamento_texto = str(linha[col_desl]).strip() if col_desl is not None and col_desl < len(linha) else ""
+            numero = re.sub(r"[^\d.,]", "", deslocamento_texto).replace(".", "").replace(",", ".")
+            try:
+                deslocamento = float(numero) if numero else 0.0
+            except ValueError:
+                deslocamento = 0.0
+            local = str(linha[col_local]).strip() if col_local is not None and col_local < len(linha) else ""
+            valor = lambda coluna: str(linha[coluna]).strip() if coluna is not None and coluna < len(linha) else ""
+            inicio_texto = str(linha[col_inicio]).strip() if col_inicio is not None and col_inicio < len(linha) else ""
+            termino_texto = str(linha[col_termino]).strip() if col_termino is not None and col_termino < len(linha) else ""
+            registro = {
+                "data": data_registro.strftime("%Y-%m-%d"),
+                "data_label": data_registro.strftime("%d/%m/%Y"),
+                "mes": chave_mes,
+                "dia": dia_texto,
+                "semana": valor(col_semana),
+                "km_saida": valor(col_km_saida),
+                "almoco": valor(col_almoco),
+                "km_chegada": valor(col_km_chegada),
+                "deslocamento": round(deslocamento, 1),
+                "hora_trabalhada": valor(col_hora_trabalhada),
+                "local": local,
+                "inicio": inicio_texto,
+                "termino": termino_texto,
+            }
+            registros.append(registro)
+            meses_relatorio[chave_mes]["registros"].append(registro)
+
+    registros.sort(key=lambda item: item["data"])
+    meses = sorted(meses_relatorio.values(), key=lambda item: item["mes"])
+    print(f"   ✅ {len(registros)} registros carregados em {len(meses)} meses para o relatório do controle diário.")
+    return {"registros": registros, "meses": meses}
+
+
 def verificar_historico_site(site, historico_meses):
     """
     Verifica se o site já foi visitado em meses anteriores.
@@ -1168,6 +1231,7 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None,
     for _, row in df_rota.iterrows():
         row_d = row.to_dict()
         site  = str(row_d.get("SITE", "")).upper()
+        indoor = bool(row_d.get("SITE_INDOOR", False))
 
         if site in sites_originais:
             status = row_d.get("STATUS", "")
@@ -1185,6 +1249,12 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None,
                     concluido_override = alerta
                     print(f"   ⚠️  {site}: visitado {len(visitas)}x anteriormente — alerta gravado.")
 
+        # Alerta operacional: basta um setor ou tecnologia INDOOR na Base 4G.
+        # Mantém o texto exatamente como solicitado na coluna CONCLUÍDO.
+        if indoor:
+            concluido_override = CONCLUIDO_INDOOR
+            print(f"   ⚠️  {site}: setor/tecnologia INDOOR — alerta gravado.")
+
         todas_linhas.append(formatar_linha(row_d, status_override=status,
                                            concluido_override=concluido_override))
 
@@ -1195,19 +1265,12 @@ def atualizar_sheets(ws, df_fixas, df_rota, sites_originais, df_aguardando=None,
 
     end_row = DATA_START_ROW + len(todas_linhas) - 1
     range_ref = f"A{DATA_START_ROW}:M{end_row}"
-
-    if DRY_RUN:
-        print(f"   [DRY-RUN] Escreveria {len(todas_linhas)} linhas em {range_ref}")
-    else:
-        ws.update(values=todas_linhas, range_name=range_ref, value_input_option="USER_ENTERED")
+    ws.update(values=todas_linhas, range_name=range_ref, value_input_option="USER_ENTERED")
 
     dados_atuais = ws.get_all_values()
     ultima_linha_com_dados = len(dados_atuais)
     if ultima_linha_com_dados > end_row:
-        if DRY_RUN:
-            print(f"   [DRY-RUN] Limparia linhas de {end_row + 1} até {ultima_linha_com_dados}")
-        else:
-            ws.batch_clear([f"A{end_row + 1}:M{ultima_linha_com_dados}"])
+        ws.batch_clear([f"A{end_row + 1}:M{ultima_linha_com_dados}"])
 
     print(f"   ✅ {len(todas_linhas)} linhas gravadas no Google Sheets.")
 
@@ -1222,11 +1285,7 @@ def _reverse_geocode(lat, lon):
             f"https://nominatim.openstreetmap.org/reverse"
             f"?format=json&lat={lat}&lon={lon}&zoom=10"
         )
-        r = _http_get(url, timeout=CFG_TIMEOUT_GEOCODE,
-                     headers={"User-Agent": "DT3.0"},
-                     label="Geocodificação")
-        if r is None:
-            return "Local"
+        r = requests.get(url, headers={"User-Agent": "DT3.0"}, timeout=6)
         addr = r.json().get("address", {})
         return (
             addr.get("city") or addr.get("town")
@@ -1236,30 +1295,47 @@ def _reverse_geocode(lat, lon):
         return "Local"
 
 
-def determinar_ponto_inicio(df_sheets):
+def determinar_ponto_inicio(df_sheets, sheet=None, aba_atual_nome=None):
+    """
+    Busca o ponto de início olhando para a ÚLTIMA atividade com status finalizado.
+
+    Reconhece como ponto de partida válido:
+      • ✓ Atividade concluída
+      • IMPRODUTIVO
+      • CANCELADO
+      • ÁREA DE RISCO
+
+    Se encontrar uma dessas, usa como ponto de partida.
+    """
+    ultima, aba_origem = buscar_ultima_atividade_finalizada(
+        df_sheets, sheet=sheet, aba_atual_nome=aba_atual_nome
+    )
+
+    if ultima is not None:
+        site = str(ultima["SITE"]).strip()
+        cidade = str(ultima["CIDADE"]).strip()
+        lat_u = safe_float(ultima["LAT"])
+        lon_u = safe_float(ultima["LONG"])
+        status_label = str(ultima["STATUS"]).strip()
+        origem = f" (aba {aba_origem})" if aba_origem else ""
+
+        print(f"\n📍 Última atividade finalizada{origem}: {site} ({status_label})")
+        print(f"   Localização: {cidade} ({lat_u}, {lon_u})")
+
+        resp = input(f"   Você ainda está em {cidade}? [S/N]: ").strip().upper()
+        if resp == "S":
+            return float(lat_u), float(lon_u), str(cidade)
+
     if not df_sheets.empty and "STATUS" in df_sheets.columns:
-        concluidas = df_sheets[df_sheets["STATUS"] == ST_CONCLUIDO]
-
-        if not concluidas.empty:
-            ultima = concluidas.iloc[-1]
-            cidade = ultima["CIDADE"]
-            lat_u = ultima["LAT"]
-            lon_u = ultima["LONG"]
-            print(f"\n📍 Última atividade concluída: {ultima['SITE']} — {cidade}")
-
-            if lat_u and lon_u:
-                resp = input(f"   Você ainda está em {cidade}? [S/N]: ").strip().upper()
-                if resp == "S":
-                    return float(lat_u), float(lon_u), str(cidade)
-
+        # ── Se não encontrou finalizada, buscar ">> EM DESLOCAMENTO" ────
         desloc = df_sheets[
             df_sheets["STATUS"].str.contains(
-                "EM DESLOCAMENTO|Aguardando", na=False, case=False
+                "EM DESLOCAMENTO", na=False, case=False
             )
         ]
         if not desloc.empty:
             prox = desloc.iloc[0]
-            print(f"\n   Próxima atividade pendente: {prox['SITE']} — {prox['CIDADE']}")
+            print(f"\n   Você está em deslocamento para: {prox['SITE']} — {prox['CIDADE']}")
     else:
         print("   Planilha sem atividades anteriores.")
 
@@ -1280,16 +1356,14 @@ def determinar_ponto_inicio(df_sheets):
                 print("   ⚠️  Entrada inválida. Tentando detecção por IP...")
 
     try:
-        r = _http_get("http://ip-api.com/json/", timeout=CFG_TIMEOUT_IP,
-                     label="IP-API")
-        if r is not None:
-            d = r.json()
-            if d.get("status") == "success":
-                lat = d["lat"]
-                lon = d["lon"]
-                cidade = d.get("city") or d.get("regionName") or "Local detectado"
-                print(f"   Localização detectada: {cidade} ({lat}, {lon})")
-                return lat, lon, cidade
+        r = requests.get("http://ip-api.com/json/", timeout=5)
+        d = r.json()
+        if d.get("status") == "success":
+            lat = d["lat"]
+            lon = d["lon"]
+            cidade = d.get("city") or d.get("regionName") or "Local detectado"
+            print(f"   Localização detectada: {cidade} ({lat}, {lon})")
+            return lat, lon, cidade
     except Exception:
         pass
 
@@ -1357,14 +1431,41 @@ def _formatar_site_robusto(site_raw):
     return s
 
 
-def _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002):
+def _normalizar_site_base(site):
+    return re.sub(r"[^A-Z0-9]", "", remove_acentos(str(site or "")).upper())
+
+
+def _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002, site=None):
     if df_base is None or df_base.empty:
         return pd.DataFrame()
     mask = (
         (abs(df_base["LATITUDE"]  - lat) <= tolerancia) &
         (abs(df_base["LONGITUDE"] - lon) <= tolerancia)
     )
-    return df_base[mask]
+    matches = df_base[mask]
+
+    # Coordenadas próximas podem incluir uma torre vizinha. Quando o SITE está
+    # disponível, ele é a chave preferencial para evitar misturar PCI/AZIMUTH.
+    if site and "SITE" in matches.columns and not matches.empty:
+        site_norm = _normalizar_site_base(site)
+        sites_base = matches["SITE"].map(_normalizar_site_base)
+        por_site = matches[sites_base == site_norm]
+        if not por_site.empty:
+            return por_site
+    return matches
+
+
+def site_tem_indoor(df_base, site, lat, lon):
+    """True se qualquer tecnologia/setor do site estiver marcado como INDOOR."""
+    coluna = "[P]ACOMODACAO_ESTRUTURA"
+    if df_base is None or coluna not in df_base.columns:
+        return False
+    try:
+        matches = _buscar_na_base4g(df_base, lat, lon, site=site)
+        acomodacao = matches[coluna].astype(str).str.strip().str.upper()
+        return acomodacao.eq("INDOOR").any()
+    except Exception:
+        return False
 
 
 def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
@@ -1374,12 +1475,7 @@ def processar_arquivo(df_raw, nome_arquivo="", df_base=None):
     registros = []
     descartados = 0
 
-    for idx, row in _tqdm(df_raw.iterrows(),
-                         desc="📂 Processando atividades",
-                         unit="arq",
-                         ncols=70,
-                         colour="green",
-                         total=len(df_raw)):
+    for idx, row in df_raw.iterrows():
         linha_num = idx + 2
 
         site_raw = str(row[col["SITE"]]).strip() if "SITE" in col else ""
@@ -1560,25 +1656,20 @@ def gerar_relatorio(df_atividades, df_base, out_dir):
             freq_234   = str(row.get("2G|3G|4G",   "")).strip()
             freq_5g    = str(row.get("5G",          "")).strip()
 
-            matches = pd.DataFrame()
-            if cidade:
-                mask_a = df_base.apply(
-                    lambda b: (
-                        float_close(lat, b["LATITUDE"])
-                        and float_close(lon, b["LONGITUDE"])
-                        and remove_acentos(cidade).lower() == remove_acentos(str(b["CIDADE"])).strip().lower()
-                    ),
-                    axis=1,
-                )
-                matches = df_base[mask_a]
-
+            # Primeiro usa a mesma coordenada e o SITE. Só então amplia a
+            # tolerância: assim PCI/AZIMUTH de torres vizinhas não se misturam.
+            matches = _buscar_na_base4g(df_base, lat, lon, tolerancia=1e-4, site=site)
             if matches.empty:
-                matches = _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002)
+                matches = _buscar_na_base4g(df_base, lat, lon, tolerancia=0.002, site=site)
 
-            pci_list = [str(int(v)) for v in matches["PCI"].dropna().unique()]    if "PCI"     in matches.columns else []
-            az_list  = [str(int(v)) for v in matches["AZIMUTH"].dropna().unique()] if "AZIMUTH" in matches.columns else []
-            pci_str  = "/".join(unique_preserve_order(pci_list))
-            az_str   = "/".join(unique_preserve_order(az_list))
+            def _lista_numerica(coluna):
+                if coluna not in matches.columns:
+                    return []
+                valores = pd.to_numeric(matches[coluna], errors="coerce").dropna().unique()
+                return [str(int(v)) if float(v).is_integer() else str(v) for v in sorted(valores)]
+
+            pci_str = "/".join(_lista_numerica("PCI"))
+            az_str  = "/".join(_lista_numerica("AZIMUTH"))
 
             if not pci_str:
                 print(f"   ⚠️  PCI não encontrado para o site {site} ({cidade}) — confira manualmente.")
@@ -1848,6 +1939,7 @@ def ler_km_hodometro(client, nome_aba=None):
 
 
 MAPBOX_USO_PATH = BASE_DIR / "mapbox_uso.json"
+MAPBOX_LIMITE   = 600
 
 
 def _chave_mes_uso():
@@ -1914,6 +2006,7 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
             "tec4g":  str(row.get("2G|3G|4G", "")),
             "tec5g":  str(row.get("5G",     "")),
             "hotel":  str(row.get("HOTEL",  "") or ""),
+            "indoor": bool(row.get("SITE_INDOOR", False)),
             "lat":    lat,
             "lon":    lon,
             "ordem":  i,  # 0 = próxima (rota real), >0 = standby
@@ -2016,9 +2109,8 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
                 f"{lon0},{lat0};{prox['lon']},{prox['lat']}"
                 f"?access_token={token}&geometries=geojson&overview=full"
             )
-            resp = _http_get(url_directions, timeout=CFG_TIMEOUT_MAPBOX,
-                           label="Mapbox Directions")
-            if resp is not None and resp.status_code == 200:
+            resp = requests.get(url_directions, timeout=15)
+            if resp.status_code == 200:
                 data_dir = resp.json()
                 if data_dir.get("routes"):
                     route = data_dir["routes"][0]
@@ -2260,10 +2352,12 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     # Substitui o km estimado por linha reta pelo valor real do hodômetro
     km_real = None
     deslocamentos_reais = []
+    controle_relatorio = {"registros": [], "meses": []}
     try:
         _client_km = conectar_sheets()
         km_real = ler_km_hodometro(_client_km)  # mês atual
         deslocamentos_reais = _ler_deslocamentos_controle(_client_km)
+        controle_relatorio = carregar_controle_relatorio(_client_km)
 
         # ── Km do mês anterior para o comparativo ────────────────────────
         if stats_anterior is not None:
@@ -2303,6 +2397,7 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
         "label_anterior": label_anterior,
         "atual":          stats_atual,
         "anterior":       stats_anterior,
+        "controle_relatorio": controle_relatorio,
     }
     j_dash = json.dumps(dash_data, ensure_ascii=False)
 
@@ -2726,6 +2821,32 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
   color:#555;padding:3px 0;border-bottom:1px solid #f0f0f0;}}
 .comp-row:last-child{{border-bottom:none;}}
 .comp-row b{{color:#012619;}}
+.relatorio-box{{margin-top:14px;padding:12px;background:#f7f9ff;border:1px solid #dce5f2;border-radius:10px;}}
+.relatorio-box p{{margin:0 0 8px;font-size:11px;color:#555;}}
+.btn-relatorio{{border:none;border-radius:7px;padding:8px 12px;background:#0B873D;color:#fff;font-size:11px;font-weight:700;cursor:pointer;}}
+.relatorio-modal{{display:none;position:fixed;inset:0;z-index:5000;background:rgba(0,0,0,.58);align-items:center;justify-content:center;padding:16px;}}
+.relatorio-modal.visivel{{display:flex;}}
+.relatorio-dialog{{width:min(420px,100%);background:#fff;border-radius:12px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.3);}}
+.relatorio-dialog h3{{margin:0 0 12px;color:#012619;font-size:16px;}}
+.relatorio-opcoes{{display:grid;gap:8px;margin-bottom:12px;}}
+.relatorio-opcao{{display:flex;align-items:center;gap:8px;font-size:12px;color:#333;}}
+.relatorio-datas{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0 14px;}}
+.relatorio-datas label{{font-size:10px;color:#666;display:grid;gap:4px;}}
+.relatorio-datas input{{border:1px solid #cfd6e6;border-radius:6px;padding:7px;font-size:12px;}}
+.relatorio-acoes{{display:flex;justify-content:flex-end;gap:8px;}}
+.relatorio-acoes button{{border:none;border-radius:6px;padding:8px 12px;font-size:11px;font-weight:700;cursor:pointer;}}
+.relatorio-cancelar{{background:#e8e5de;color:#333;}}
+.relatorio-gerar{{background:#0B873D;color:#fff;}}
+.relatorio-erro{{min-height:16px;color:#c0392b;font-size:11px;margin-bottom:6px;}}
+.relatorio-pdf-modal{{display:none;position:fixed;inset:0;z-index:5100;background:rgba(0,0,0,.65);align-items:center;justify-content:center;padding:12px;}}
+.relatorio-pdf-modal.visivel{{display:flex;}}
+.relatorio-pdf-dialog{{width:min(1120px,100%);height:min(92vh,780px);background:#fff;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.4);}}
+.relatorio-pdf-header{{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#012619;color:#fff;font-size:12px;font-weight:700;}}
+.relatorio-pdf-acoes{{display:flex;gap:7px;}}
+.relatorio-pdf-acoes button{{border:0;border-radius:5px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer;}}
+.relatorio-pdf-download{{background:#A9D9C2;color:#012619;}}
+.relatorio-pdf-fechar{{background:rgba(255,255,255,.15);color:#fff;}}
+#relatorio-pdf-frame{{border:0;flex:1;width:100%;background:#e9e9e9;}}
 
 /* ── Deslocamentos ─── */
 .desl-lista{{display:flex;flex-direction:column;gap:6px;}}
@@ -3311,6 +3432,7 @@ map.on('load', function() {{
           '📍 Próxima: ' + p.id,
           ['<b>Cidade:</b> ' + p.cidade,
            freqStr(p) ? '<b>Freq:</b> ' + freqStr(p) : '',
+           p.indoor ? '<b style="color:#b91c1c;">⚠️ SITE INDOOR</b>' : '',
            p.hotel ? '<b>Hotel:</b> ' + p.hotel : ''],
           '<div class="popup-status" style="background:#dbeafe;color:#1e40af;">🎯 Próxima atividade</div>',
           null
@@ -3325,6 +3447,7 @@ map.on('load', function() {{
           p.id,
           ['<b>Cidade:</b> ' + p.cidade,
            freqStr(p) ? '<b>Freq:</b> ' + freqStr(p) : '',
+           p.indoor ? '<b style="color:#b91c1c;">⚠️ SITE INDOOR</b>' : '',
            p.hotel ? '<b>Hotel:</b> ' + p.hotel : ''],
           '<div class="popup-status" style="background:#f5f5f5;color:#555;">🕐 Standby (' + (i+1) + 'ª na fila)</div>',
           btnHtml
@@ -4016,6 +4139,10 @@ if (lerUso() >= LIMITE_QUOTA) {{
       <!-- Tab Comparativo -->
       <div class="dash-tab-panel" id="dtab-comparativo">
         <div class="dash-comp-grid" id="dash-comp"></div>
+        <div class="relatorio-box">
+          <p>Consulte os dados da planilha CONTROLE DIÁRIO DE ATIVIDADES.</p>
+          <button class="btn-relatorio" onclick="abrirModalRelatorio()">📄 Solicitar relatório PDF</button>
+        </div>
       </div>
 
       <!-- Tab Deslocamentos -->
@@ -4031,6 +4158,39 @@ if (lerUso() >= LIMITE_QUOTA) {{
       </div>
 
     </div>
+  </div>
+</div>
+
+<div id="relatorio-modal" class="relatorio-modal">
+  <div class="relatorio-dialog">
+    <h3>Solicitar relatório</h3>
+    <div class="relatorio-opcoes">
+      <label class="relatorio-opcao"><input type="radio" name="rel-periodo" value="todos" checked onchange="atualizarCamposRelatorio()"> Todo o período disponível</label>
+      <label class="relatorio-opcao"><input type="radio" name="rel-periodo" value="mes" onchange="atualizarCamposRelatorio()"> Mês atual</label>
+      <label class="relatorio-opcao"><input type="radio" name="rel-periodo" value="datas" onchange="atualizarCamposRelatorio()"> Escolher data/período</label>
+    </div>
+    <div class="relatorio-datas" id="relatorio-datas" style="display:none">
+      <label>Data inicial<input type="date" id="rel-data-inicio"></label>
+      <label>Data final<input type="date" id="rel-data-fim"></label>
+    </div>
+    <div class="relatorio-erro" id="relatorio-erro"></div>
+    <div class="relatorio-acoes">
+      <button class="relatorio-cancelar" onclick="fecharModalRelatorio()">Cancelar</button>
+      <button class="relatorio-gerar" onclick="gerarRelatorioPDF()">Gerar relatório</button>
+    </div>
+  </div>
+</div>
+
+<div id="relatorio-pdf-modal" class="relatorio-pdf-modal">
+  <div class="relatorio-pdf-dialog">
+    <div class="relatorio-pdf-header">
+      <span>Pré-visualização do relatório</span>
+      <div class="relatorio-pdf-acoes">
+        <button class="relatorio-pdf-download" onclick="baixarRelatorioPDF()">⬇ Baixar PDF</button>
+        <button class="relatorio-pdf-fechar" onclick="fecharPreviewRelatorio()">✕ Fechar</button>
+      </div>
+    </div>
+    <iframe id="relatorio-pdf-frame" title="Pré-visualização do relatório"></iframe>
   </div>
 </div>
 
@@ -4150,6 +4310,197 @@ function renderDashboard() {{
   _deslLista(a.top_maiores, 'dash-maiores', '');
   _deslLista(a.top_menores, 'dash-menores', 'menor');
 }}
+
+function _dataHojeRelatorio() {{
+  var agora = new Date();
+  var mes = String(agora.getMonth() + 1).padStart(2, '0');
+  var dia = String(agora.getDate()).padStart(2, '0');
+  return agora.getFullYear() + '-' + mes + '-' + dia;
+}}
+
+function abrirModalRelatorio() {{
+  var hoje = _dataHojeRelatorio();
+  document.getElementById('rel-data-inicio').min = '2025-05-01';
+  document.getElementById('rel-data-inicio').max = hoje;
+  document.getElementById('rel-data-fim').min = '2025-05-01';
+  document.getElementById('rel-data-fim').max = hoje;
+  document.getElementById('relatorio-erro').textContent = '';
+  document.getElementById('relatorio-modal').classList.add('visivel');
+}}
+
+function fecharModalRelatorio() {{
+  document.getElementById('relatorio-modal').classList.remove('visivel');
+}}
+
+function atualizarCamposRelatorio() {{
+  var personalizado = document.querySelector('input[name="rel-periodo"]:checked').value === 'datas';
+  document.getElementById('relatorio-datas').style.display = personalizado ? 'grid' : 'none';
+}}
+
+document.getElementById('relatorio-modal').addEventListener('click', function(e) {{
+  if (e.target === this) fecharModalRelatorio();
+}});
+
+var _relatorioPdfUrl = null;
+var _relatorioPdfNome = 'relatorio_controle_diario.pdf';
+
+function fecharPreviewRelatorio() {{
+  document.getElementById('relatorio-pdf-modal').classList.remove('visivel');
+  document.getElementById('relatorio-pdf-frame').src = 'about:blank';
+  if (_relatorioPdfUrl) {{ URL.revokeObjectURL(_relatorioPdfUrl); _relatorioPdfUrl = null; }}
+}}
+
+function baixarRelatorioPDF() {{
+  if (!_relatorioPdfUrl) return;
+  var link = document.createElement('a');
+  link.href = _relatorioPdfUrl;
+  link.download = _relatorioPdfNome;
+  link.click();
+}}
+
+function _carregarJsPdf(callback) {{
+  if (window.jspdf && window.jspdf.jsPDF) {{ callback(window.jspdf.jsPDF); return; }}
+  var script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+  script.onload = function() {{ callback(window.jspdf.jsPDF); }};
+  script.onerror = function() {{
+    document.getElementById('relatorio-erro').textContent = 'Não foi possível carregar o gerador de PDF. Verifique a internet.';
+  }};
+  document.head.appendChild(script);
+}}
+
+function _textoTabela(doc, texto, x, y, largura) {{
+  var valor = String(texto || '').replace(/⏰/g, '').trim();
+  doc.setFontSize(6.5);
+  while (valor.length > 1 && doc.getTextWidth(valor) > largura - 2) valor = valor.slice(0, -2) + '…';
+  doc.text(valor, x + 1, y + 4.5, {{maxWidth: largura - 2}});
+}}
+
+function _desenharCabecalhoPDF(doc, y, titulo, x, largura) {{
+  doc.setDrawColor(20, 20, 20);
+  doc.setLineWidth(.25);
+  doc.setFillColor(255, 255, 255); doc.rect(x, y, largura, 10, 'FD');
+  var centro = x + largura / 2;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.text('CONTROLE DIÁRIO DE ATIVIDADES', centro, y + 6.5, {{align:'center'}});
+  doc.setFontSize(8); doc.text(titulo, centro, y + 9, {{align:'center'}});
+  doc.setFontSize(7); doc.text('TEC. FELIPE CARDOSO', x + largura - 2, y + 4.5, {{align:'right'}});
+  doc.text('METRO TELWORKS', x + largura - 2, y + 8, {{align:'right'}});
+}}
+
+function _gerarPdfVisual(jsPDF, itens, inicio, fim, resumo, docExistente) {{
+  var doc = docExistente || new jsPDF({{orientation:'portrait', unit:'mm', format:'a4'}});
+  var x = 12, y = 16, rowH = 5.2, largura = 186;
+  var larguras = [8,16,21,15,15,21,15,21,22,32];
+  var cabecalhos = ['DIA','SEMANA','KM SAÍDA','H: INÍCIO','H: ALMOÇO','KM CHEGADA','H: TÉRMINO','DESLOCAMENTO','HORA TRABALHADA','CIDADES'];
+  var cores = [[245,245,245],[245,245,245],[199,222,241],[255,247,194],[255,247,194],[185,218,174],[255,255,0],[106,157,220],[218,216,239],[255,255,255]];
+  var titulo = 'MÊS ' + (resumo.label || (inicio.slice(5,7) + '/ ' + inicio.slice(0,4)));
+
+  function pagina() {{
+    if (docExistente) doc.addPage();
+    y = 16;
+    _desenharCabecalhoPDF(doc, 6, titulo, x, largura);
+    y = 18;
+    var cx = x;
+    cabecalhos.forEach(function(label, i) {{
+      doc.setFillColor(cores[i][0], cores[i][1], cores[i][2]);
+      doc.rect(cx, y, larguras[i], rowH, 'FD');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(5.8);
+      doc.text(label, cx + larguras[i] / 2, y + 4, {{align:'center', maxWidth:larguras[i]-1}});
+      cx += larguras[i];
+    }});
+    y += rowH;
+  }}
+
+  pagina();
+  itens.forEach(function(item) {{
+    if (y + rowH > 270) pagina();
+    var valores = [item.dia, item.semana, item.km_saida, item.inicio, item.almoco, item.km_chegada,
+      item.termino, (Number(item.deslocamento || 0).toFixed(1) + ' KM'), item.hora_trabalhada, item.local];
+    var cx = x;
+    valores.forEach(function(valor, i) {{
+      var cor = cores[i];
+      if (i === 0 && String(item.semana).toUpperCase().indexOf('DOM') >= 0) cor = [255, 35, 35];
+      else if (i === 0 && String(item.semana).toUpperCase().indexOf('SAB') >= 0) cor = [255, 220, 85];
+      doc.setFillColor(cor[0], cor[1], cor[2]); doc.rect(cx, y, larguras[i], rowH, 'FD');
+      _textoTabela(doc, valor, cx, y, larguras[i]); cx += larguras[i];
+    }});
+    y += rowH;
+  }});
+
+  if (y + 12 > 286) y = 270;
+  var totalDeslocamento = resumo.total_deslocamento || '';
+  var totalHora = resumo.total_hora || '';
+  if (!totalDeslocamento) {{
+    var kmFallback = itens.reduce(function(total, item) {{ return total + Number(item.deslocamento || 0); }}, 0);
+    totalDeslocamento = kmFallback ? kmFallback.toLocaleString('pt-BR', {{minimumFractionDigits: 0, maximumFractionDigits: 0}}) : '';
+  }}
+  if (!totalHora) {{
+    var segundos = itens.reduce(function(total, item) {{
+      var texto = String(item.hora_trabalhada || '').replace(/[^0-9:]/g, '');
+      var partes = texto.split(':');
+      if (partes.length < 2) return total;
+      return total + Number(partes[0]) * 3600 + Number(partes[1]) * 60 + Number(partes[2] || 0);
+    }}, 0);
+    if (segundos) {{
+      var horas = Math.floor(segundos / 3600);
+      var minutos = Math.floor((segundos % 3600) / 60);
+      var segundosRestantes = segundos % 60;
+      totalHora = String(horas).padStart(2, '0') + ':' + String(minutos).padStart(2, '0') + ':' + String(segundosRestantes).padStart(2, '0');
+    }}
+  }}
+  doc.setFillColor(0, 0, 0); doc.rect(x, y, largura, 8, 'F');
+  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
+  doc.text(String(totalDeslocamento), x + 111 + 10.5, y + 5, {{align:'center'}});
+  doc.text(String(totalHora), x + 132 + 11, y + 5, {{align:'center'}});
+  doc.setTextColor(0, 0, 0); y += 8;
+  doc.setFillColor(244, 177, 131); doc.rect(x, y, largura, 7, 'F');
+  doc.setFontSize(7); doc.text('OBSERVAÇÕES :', x + 1, y + 4.5);
+  if (resumo.observacoes) _textoTabela(doc, resumo.observacoes, x + 35, y, largura - 36);
+  return doc;
+}}
+
+function gerarRelatorioPDF() {{
+  var controle = DASH_STATS.controle_relatorio || {{registros:[], meses:[]}};
+  var dados = controle.registros || [];
+  var mesesDisponiveis = controle.meses || [];
+  var tipo = document.querySelector('input[name="rel-periodo"]:checked').value;
+  var hoje = _dataHojeRelatorio(), inicio = '2025-05-01', fim = hoje;
+  if (tipo === 'mes') inicio = hoje.slice(0, 8) + '01';
+  else if (tipo === 'datas') {{
+    inicio = document.getElementById('rel-data-inicio').value;
+    fim = document.getElementById('rel-data-fim').value;
+    if (!inicio || !fim || inicio > fim || inicio < '2025-05-01' || fim > hoje) {{
+      document.getElementById('relatorio-erro').textContent = 'Informe um período entre 01/05/2025 e hoje.'; return;
+    }}
+  }}
+  var selecionados = dados.filter(function(item) {{ return item.data >= inicio && item.data <= fim; }});
+  var mesesSelecionados = mesesDisponiveis.filter(function(mes) {{
+    return mes.mes >= inicio.slice(0, 7) && mes.mes <= fim.slice(0, 7);
+  }});
+  if (!selecionados.length && !mesesSelecionados.length) {{ document.getElementById('relatorio-erro').textContent = 'Não há registros para o período selecionado.'; return; }}
+  document.getElementById('relatorio-erro').textContent = 'Preparando pré-visualização...';
+  _carregarJsPdf(function(jsPDF) {{
+    var doc = null;
+    mesesSelecionados.forEach(function(mes) {{
+      var itensMes = selecionados.filter(function(item) {{ return item.mes === mes.mes; }});
+      var primeiroDia = mes.mes + '-01';
+      var ultimoDia = new Date(Number(mes.mes.slice(0,4)), Number(mes.mes.slice(5,7)), 0).toISOString().slice(0, 10);
+      var resumo = Object.assign({{}}, mes);
+      if (inicio > primeiroDia || fim < ultimoDia) {{
+        resumo.total_deslocamento = '';
+        resumo.total_hora = '';
+        resumo.observacoes = '';
+      }}
+      doc = _gerarPdfVisual(jsPDF, itensMes, inicio, fim, resumo, doc);
+    }});
+    if (_relatorioPdfUrl) URL.revokeObjectURL(_relatorioPdfUrl);
+    _relatorioPdfUrl = URL.createObjectURL(doc.output('blob'));
+    _relatorioPdfNome = 'relatorio_controle_diario_' + inicio + '_a_' + fim + '.pdf';
+    document.getElementById('relatorio-pdf-frame').src = _relatorioPdfUrl;
+    document.getElementById('relatorio-pdf-modal').classList.add('visivel');
+    fecharModalRelatorio();
+  }});
+}}
 </script>
 
 </body>
@@ -4167,19 +4518,14 @@ function renderDashboard() {{
 
 def _publicar_arquivo_github(api_base, headers, arquivo_remoto, conteudo_bytes, mensagem):
     """Publica ou atualiza um único arquivo no GitHub. Retorna True se OK."""
-    if DRY_RUN:
-        print(f"   [DRY-RUN] Publicaria {arquivo_remoto} no GitHub")
-        return True
-
     import base64
     conteudo_b64 = base64.b64encode(conteudo_bytes).decode("utf-8")
     api_url = f"{api_base}/contents/{arquivo_remoto}"
 
     sha_atual = None
     try:
-        r = _http_get(api_url, timeout=CFG_TIMEOUT_GITHUB,
-                     headers=headers, label="GitHub GET")
-        if r is not None and r.status_code == 200:
+        r = requests.get(api_url, headers=headers, timeout=10)
+        if r.status_code == 200:
             sha_atual = r.json().get("sha")
     except Exception as e:
         print(f"   ❌ Erro ao consultar {arquivo_remoto}: {e}")
@@ -4190,9 +4536,8 @@ def _publicar_arquivo_github(api_base, headers, arquivo_remoto, conteudo_bytes, 
         payload["sha"] = sha_atual
 
     try:
-        r = _http_put(api_url, payload, timeout=CFG_TIMEOUT_GITHUB,
-                     headers=headers, label="GitHub PUT")
-        if r is not None and r.status_code in (200, 201):
+        r = requests.put(api_url, headers=headers, json=payload, timeout=30)
+        if r.status_code in (200, 201):
             return True
         else:
             print(f"   ❌ GitHub {arquivo_remoto}: status {r.status_code} — "
@@ -4339,11 +4684,7 @@ def main_mapa():
     print(f"   Pendentes na rota       : {len(df_pendentes)}")
     print(f"   Aguardando              : {len(df_aguardando)}")
 
-    lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets)
-
-    print("\n[2.5] Verificando qualidade dos dados...")
-    hoteis = carregar_hoteis()
-    _alertas_qualidade(df_sheets, hoteis)
+    lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets, sheet=sheet, aba_atual_nome=ws.title)
 
     print("\n[3/3] Gerando mapa e publicando...")
     print("   → Carregando histórico de meses anteriores...")
@@ -4399,7 +4740,7 @@ def main():
 
     # ── [1/7] Base 4G ─────────────────────────────────────
     print("\n[1/7] Carregando Base 4G...")
-    df_base = pd.read_excel(BASE_4G_PATH, engine="openpyxl")
+    df_base = carregar_base_4g()
     print(f"   {len(df_base):,} registros.")
 
     # ── [2/7] Google Sheets ───────────────────────────────
@@ -4423,7 +4764,7 @@ def main():
 
     # ── [4/7] Ponto de partida ────────────────────────────
     print("\n[4/7] Determinando ponto de partida...")
-    lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets)
+    lat0, lon0, cidade0 = determinar_ponto_inicio(df_sheets, sheet=sheet, aba_atual_nome=ws.title)
 
     # ── [5/7] Novas atividades ────────────────────────────
     print("\n[5/7] Processando novas atividades...")
@@ -4529,21 +4870,23 @@ def main():
         return
 
     df_pool = pd.concat(frames, ignore_index=True)
+    df_pool["SITE_INDOOR"] = [
+        site_tem_indoor(df_base, row["SITE"], row["LAT"], row["LONG"])
+        for _, row in df_pool.iterrows()
+    ]
+    total_indoor = int(df_pool["SITE_INDOOR"].sum())
     print(
         f"   Pool: {len(df_pool)} atividades "
         f"({len(df_pool_sheets)} existentes + {len(df_novas_filtradas)} novas)"
     )
+    if total_indoor:
+        print(f"   ⚠️  {total_indoor} atividade(s) com setor/tecnologia INDOOR.")
 
     rota_final = otimizar_rota(df_pool, lat0, lon0)
 
     ativ_path = BASE_DIR / "ATIVIDADES_GERADAS.xlsx"
     rota_final.to_excel(ativ_path, index=False)
     print(f"   ATIVIDADES_GERADAS.xlsx salvo.")
-
-    # ── [6.5] Alertas de qualidade ────────────────────────────
-    print("\n[6.5] Verificando qualidade dos dados...")
-    hoteis = carregar_hoteis()
-    _alertas_qualidade(df_sheets, hoteis)
 
     # ── [7/7] Gerar saídas ────────────────────────────────
     print("\n[7/7] Gerando saídas...")
@@ -4712,32 +5055,33 @@ def main_auto():
     log("🔄 Mudança detectada — atualizando mapa...")
 
     # ── 5. Determinar ponto de partida automaticamente ───────────────────
-    # Usa a última atividade concluída como ponto de partida (sem perguntar)
+    # Usa a última atividade finalizada, inclusive da aba anterior na virada
+    # do mês, como ponto de partida (sem perguntar).
     lat0, lon0, cidade0 = None, None, None
 
-    concluidas = df_sheets[df_sheets["STATUS"] == ST_CONCLUIDO].copy()
-    if not concluidas.empty:
-        ultima = concluidas.iloc[-1]
+    ultima, aba_origem = buscar_ultima_atividade_finalizada(
+        df_sheets, sheet=sheet, aba_atual_nome=ws.title
+    )
+    if ultima is not None:
         try:
             lat0    = float(str(ultima["LAT"]).replace(",", "."))
             lon0    = float(str(ultima["LONG"]).replace(",", "."))
             cidade0 = str(ultima.get("CIDADE", "")) or "Local"
-            log(f"📍 Partida automática: {ultima['SITE']} — {cidade0}")
+            origem = f" (aba {aba_origem})" if aba_origem else ""
+            log(f"📍 Partida automática{origem}: {ultima['SITE']} — {cidade0}")
         except Exception:
             lat0 = lon0 = None
 
     if lat0 is None or lat0 == 0.0:
         # Fallback: tentar geolocalização por IP
         try:
-            r = _http_get("http://ip-api.com/json/", timeout=CFG_TIMEOUT_IP,
-                         label="IP-API (auto)")
-            if r is not None:
-                d = r.json()
-                if d.get("status") == "success":
-                    lat0    = d["lat"]
-                    lon0    = d["lon"]
-                    cidade0 = d.get("city", "Local detectado")
-                    log(f"📍 Partida por IP: {cidade0} ({lat0}, {lon0})")
+            r = requests.get("http://ip-api.com/json/", timeout=5)
+            d = r.json()
+            if d.get("status") == "success":
+                lat0    = d["lat"]
+                lon0    = d["lon"]
+                cidade0 = d.get("city", "Local detectado")
+                log(f"📍 Partida por IP: {cidade0} ({lat0}, {lon0})")
         except Exception:
             pass
 
@@ -4805,139 +5149,8 @@ def main_auto():
 
 
 # ============================================================
-# ALERTAS DE QUALIDADE DE DADOS
+# PONTO DE ENTRADA
 # ============================================================
-
-def _alertas_qualidade(df_atividades, hoteis: list = None) -> int:
-    """
-    Inspeciona df_atividades e lista de hoteis e imprime alertas de qualidade.
-    Retorna número de alertas (para opcional blocking).
-    Não levanta exceções — apenas informa. O processamento continua normalmente.
-    """
-    if hoteis is None:
-        hoteis = []
-
-    alertas = []
-
-    # ── Atividades ──────────────────────────────────────────────────────────
-    STATUS_CONHECIDOS = {
-        "✓ Atividade concluída", "IMPRODUTIVO", ">> EM DESLOCAMENTO",
-        "Aguardando para deslocar", "Nova Atividade",
-        "Atividade iniciada", "ÁREA DE RISCO", "CANCELADA", ""
-    }
-
-    for idx, row in df_atividades.iterrows():
-        site   = str(row.get("SITE", f"linha {idx+2}")).strip()
-        status = str(row.get("STATUS", "")).strip()
-        lat    = safe_float(row.get("LAT",  0))
-        lon    = safe_float(row.get("LONG", 0))
-
-        if lat == 0 and lon == 0 and status not in ("", ">> EM DESLOCAMENTO"):
-            alertas.append(f"   ⚠️  {site}: coordenadas 0,0 — será ignorado no mapa")
-
-        if status and status not in STATUS_CONHECIDOS:
-            alertas.append(f"   ⚠️  {site}: status desconhecido → '{status}'")
-
-        # Hotel informado na planilha mas sem match na planilha HOTEIS
-        hotel_celula = str(row.get("HOTEL", "")).strip()
-        if hotel_celula and hotel_celula not in (".", "-", "nan", ""):
-            hotel_nome = extrair_nome_hotel(hotel_celula)
-            if hoteis and hotel_nome:
-                # Verificar se há match (fuzzy)
-                encontrou = False
-                for h in hoteis:
-                    if _match_hotel(hotel_nome, h.get("nome", "")):
-                        encontrou = True
-                        break
-                if not encontrou:
-                    alertas.append(
-                        f"   ⚠️  {site}: hotel '{hotel_nome}' "
-                        f"não encontrado na planilha HOTEIS"
-                    )
-
-    # ── Hotéis ──────────────────────────────────────────────────────────────
-    for h in hoteis:
-        nome = h.get("nome", "?")
-        if not h.get("lat") or not h.get("lon"):
-            alertas.append(f"   ⚠️  Hotel '{nome}': sem coordenadas — não aparecerá no mapa")
-        if not h.get("valor"):
-            alertas.append(f"   ⚠️  Hotel '{nome}': sem ULTIMO_VALOR cadastrado")
-        if not h.get("tel"):
-            alertas.append(f"   ⚠️  Hotel '{nome}': sem telefone cadastrado")
-
-    # ── Relatório ────────────────────────────────────────────────────────────
-    if alertas:
-        print(f"\n  📋 ALERTAS DE QUALIDADE ({len(alertas)} item(ns)):")
-        for a in alertas:
-            print(a)
-        print()
-    else:
-        print("  ✅ Qualidade dos dados: nenhum problema encontrado.\n")
-
-    return len(alertas)
-
-
-# ============================================================
-# VALIDAÇÃO EARLY DE AMBIENTE
-# ============================================================
-
-def _validar_ambiente() -> bool:
-    """
-    Verifica pré-requisitos críticos antes de qualquer processamento.
-    Retorna True se tudo OK, False se algo crítico estiver faltando.
-    Imprime relatório formatado independente do resultado.
-    """
-    print("  Verificando ambiente...")
-    erros   = []
-    avisos  = []
-
-    # Arquivos obrigatórios
-    arquivos_criticos = {
-        "Google credentials": CREDS_PATH,
-        "Mapbox token":       MAPBOX_TOKEN_PATH,
-        "GitHub token":       GITHUB_TOKEN_PATH,
-    }
-    for nome, path in arquivos_criticos.items():
-        if not path.exists():
-            erros.append(f"Arquivo não encontrado: {path.name}  ({nome})")
-        else:
-            print(f"   ✅ {nome}: {path.name}")
-
-    # config.json (não crítico — só avisa)
-    if not (BASE_DIR / "config.json").exists():
-        avisos.append("config.json ausente — usando defaults internos (OK)")
-
-    # Valida JSON do credentials.json (detecta arquivo corrompido)
-    if CREDS_PATH.exists():
-        try:
-            with open(CREDS_PATH, encoding="utf-8") as f:
-                _cred = json.load(f)
-            if "client_email" not in _cred:
-                erros.append("credentials.json inválido — chave 'client_email' ausente")
-        except Exception as e:
-            erros.append(f"credentials.json corrompido: {e}")
-
-    # Valida que o token Mapbox não está vazio
-    if MAPBOX_TOKEN_PATH.exists():
-        _tok = MAPBOX_TOKEN_PATH.read_text(encoding="utf-8").strip()
-        if not _tok or len(_tok) < 20:
-            erros.append("mapbox_token.txt vazio ou muito curto — token inválido")
-
-    # Relatório final
-    for a in avisos:
-        print(f"   ⚠️  {a}")
-    for e in erros:
-        print(f"   ❌ {e}")
-
-    if erros:
-        print()
-        print("  ❌ Ambiente inválido. Corrija os erros acima e tente novamente.")
-        return False
-
-    print("  ✅ Ambiente validado com sucesso.\n")
-    return True
-
-
 
 if __name__ == "__main__":
 
@@ -4960,14 +5173,6 @@ if __name__ == "__main__":
                 pass
         sys.exit(0)
 
-    # ── Validação early de credenciais ────────────────────────────────────
-    if not _validar_ambiente():
-        try:
-            input("  Pressione ENTER para sair...")
-        except Exception:
-            pass
-        sys.exit(1)
-
     # ── Modo interativo (execução manual) ────────────────────────────────
     print("\n" + "=" * 60)
     print("  DT 3.0 — Automação Drive Test")
@@ -4983,14 +5188,10 @@ if __name__ == "__main__":
     print("      Lê status atuais do Sheets e gera novo")
     print("      mapa sem reprocessar nada mais.")
     print()
-    print("  [3] Dry-run (simulação)")
-    print("      Execução completa SEM gravar em Sheets")
-    print("      e SEM publicar no GitHub. Apenas log.")
-    print()
 
     while True:
         try:
-            opcao = input("  Digite 1, 2 ou 3: ").strip()
+            opcao = input("  Digite 1 ou 2: ").strip()
         except Exception:
             opcao = "1"
 
@@ -5020,22 +5221,5 @@ if __name__ == "__main__":
                     pass
             break
 
-        elif opcao == "3":
-            # DRY_RUN já é global — não precisa declarar com type annotation
-            import __main__
-            __main__.DRY_RUN = True
-            print("\n  ⚠️  MODO DRY-RUN ATIVO — nenhum dado será gravado.\n")
-            try:
-                main()
-            except Exception as e:
-                print(f"\n❌ Erro inesperado: {e}")
-                import traceback
-                traceback.print_exc()
-                try:
-                    input("\nPressione ENTER para sair...")
-                except Exception:
-                    pass
-            break
-
         else:
-            print("  ⚠️  Opção inválida. Digite 1, 2 ou 3.")
+            print("  ⚠️  Opção inválida. Digite 1 ou 2.")
