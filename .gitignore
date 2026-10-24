@@ -7,6 +7,7 @@ OUT/
 __pycache__/
 build/
 credentials.json
+credenciais/
 dt30_main.exe
 dt30_main.spec
 github_token.txt
@@ -15,3 +16,4 @@ mapbox_token.txt
 mapbox_uso.json
 novas atividades/
 tmp/
+PASTAS PADRÃO/

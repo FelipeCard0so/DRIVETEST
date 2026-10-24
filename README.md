@@ -62,9 +62,17 @@ Algumas decisões de design seguem regras específicas do processo real de Drive
 
 ```
 DT 3.0/
-├── dt30_main.py
-├── credentials.json       # Credenciais da Google Service Account
-├── config.json             # Configurações (IDs de planilhas, tokens)
+├── dt30_main.py            # Ponto de entrada/orquestrador
+├── python/                 # Implementação legada em migração segura
+├── html/                   # Recursos HTML do mapa
+├── js/                     # Recursos JavaScript do mapa
+├── css/                    # Recursos CSS do mapa
+├── mapbox/                 # Recursos específicos do Mapbox
+├── credenciais/            # credentials.json e tokens locais
+├── GERAR PASTAS - DT/      # Gerador de pastas executado ao final
+├── Base_4G.xlsx
+├── HOTEIS.xlsx
+├── OUT/                    # Relatórios gerados
 └── dist/
     └── dt30_main.exe       # Executável gerado via PyInstaller
 ```
@@ -87,8 +95,13 @@ python dt30_main.py
 Ou, para gerar o executável:
 
 ```bash
-pyinstaller --onefile --console dt30_main.py
+pyinstaller --clean --onefile --console dt30_main.spec
 ```
+
+O `dt30_main.exe` inicia o gerador de pastas em uma janela separada depois de
+salvar o relatório em `OUT/RELATORIO_SSV_COMPLETO.txt`. O executável do gerador
+deve ser reconstruído a partir de `GERAR PASTAS - DT/PASTAS_DT.spec` após a
+alteração dos caminhos.
 
 ---
 
