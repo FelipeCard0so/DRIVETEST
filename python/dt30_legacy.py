@@ -2129,7 +2129,11 @@ def ler_km_hodometro(client, nome_aba=None):
     return km_total
 
 
-MAPBOX_USO_PATH = BASE_DIR / "mapbox_uso.json"
+# O contador é temporário/runtime e não precisa ficar na pasta sincronizada
+# do projeto, onde pode ser bloqueado pelo OneDrive ou pelo Git.
+_RUNTIME_DIR = Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "DT3.0"
+_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+MAPBOX_USO_PATH = _RUNTIME_DIR / "mapbox_uso.json"
 MAPBOX_LIMITE   = 600
 
 
@@ -2594,17 +2598,6 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     }
     j_dash = json.dumps(dash_data, **json_compacto)
 
-    # ── Token Mapbox: salvo em arquivo JS separado (fora do HTML) ──
-    # O HTML carrega mapbox_config.js que NÃO vai para o GitHub.
-    # Isso resolve o erro 409 "Secret detected in content" do GitHub.
-    config_js_path = BASE_DIR / "mapbox_config.js"
-    try:
-        with open(config_js_path, "w", encoding="utf-8") as f_cfg:
-            f_cfg.write(f"var MAPBOX_TOKEN = '{token}';\n")
-        print(f"   mapbox_config.js gerado (token protegido).")
-    except Exception as e:
-        print(f"   ⚠️  Nao foi possivel gerar mapbox_config.js: {e}")
-
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2613,7 +2606,7 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
 <title>DT 3.0 — Mapa de Rota</title>
 
 <!-- Token Mapbox (arquivo local, nunca publicado no GitHub) -->
-<script src="mapbox_config.js"></script>
+<script src="https://felipecard0so.github.io/dt30-mapa/mapbox_config.js"></script>
 
 <!-- Mapbox GL JS -->
 <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet"/>
@@ -4713,7 +4706,6 @@ function gerarRelatorioPDF() {{
     path = BASE_DIR / "MAPA_ROTAS.html"
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
-    _externalizar_recursos_mapa(path)
     print(f"   Arquivo: {path}")
 
 
@@ -4865,23 +4857,7 @@ def publicar_mapa_github(html_path):
         api_base, headers, "mapbox_config.js", config_js_ofuscado, mensagem
     )
 
-    # ── Publicar recursos separados do mapa ──────────────────
-    ok_recursos = True
-    for remoto, local in (
-        ("css/mapa.css", BASE_DIR / "css" / "mapa.css"),
-        ("js/mapa.js", BASE_DIR / "js" / "mapa.js"),
-    ):
-        try:
-            conteudo = local.read_bytes()
-        except Exception:
-            print(f"   ⚠️  Recurso não encontrado para publicação: {local}")
-            ok_recursos = False
-            continue
-        ok_recursos = _publicar_arquivo_github(
-            api_base, headers, remoto, conteudo, mensagem
-        ) and ok_recursos
-
-    if ok_html and ok_config and ok_recursos:
+    if ok_html and ok_config:
         url_pagina = f"https://{usuario}.github.io/{repo}/MAPA_ROTAS.html"
         print(f"   ✅ Mapa publicado no GitHub!")
         print(f"   🌐 Acesse: {url_pagina}")
