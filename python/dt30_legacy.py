@@ -13,11 +13,18 @@ import math
 import subprocess
 import unicodedata
 import requests
+import certifi
 import pandas as pd
 import gspread
 from pathlib import Path
 from datetime import datetime
 from google.oauth2.service_account import Credentials
+
+# Evita que o console Windows interrompa o tratamento de erros por causa de
+# símbolos Unicode usados nas mensagens do programa.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ============================================================
@@ -767,6 +774,14 @@ def conectar_sheets():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
+    # Garante um caminho de certificado válido no executável one-file e evita
+    # proxies locais herdados do Windows que podem apontar para arquivo/socket
+    # inexistente no notebook.
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+    os.environ.pop("REQUESTS_CA_BUNDLE", None)
+    for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                       "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(_proxy_var, None)
     creds = Credentials.from_service_account_file(str(CREDS_PATH), scopes=scopes)
     return gspread.authorize(creds)
 
@@ -2114,7 +2129,11 @@ def ler_km_hodometro(client, nome_aba=None):
     return km_total
 
 
-MAPBOX_USO_PATH = BASE_DIR / "mapbox_uso.json"
+# O contador é temporário/runtime e não precisa ficar na pasta sincronizada
+# do projeto, onde pode ser bloqueado pelo OneDrive ou pelo Git.
+_RUNTIME_DIR = Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "DT3.0"
+_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+MAPBOX_USO_PATH = _RUNTIME_DIR / "mapbox_uso.json"
 MAPBOX_LIMITE   = 600
 
 
@@ -2579,17 +2598,6 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
     }
     j_dash = json.dumps(dash_data, **json_compacto)
 
-    # ── Token Mapbox: salvo em arquivo JS separado (fora do HTML) ──
-    # O HTML carrega mapbox_config.js que NÃO vai para o GitHub.
-    # Isso resolve o erro 409 "Secret detected in content" do GitHub.
-    config_js_path = BASE_DIR / "mapbox_config.js"
-    try:
-        with open(config_js_path, "w", encoding="utf-8") as f_cfg:
-            f_cfg.write(f"var MAPBOX_TOKEN = '{token}';\n")
-        print(f"   mapbox_config.js gerado (token protegido).")
-    except Exception as e:
-        print(f"   ⚠️  Nao foi possivel gerar mapbox_config.js: {e}")
-
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2598,7 +2606,7 @@ df_rota, lat0, lon0, cidade0, df_fixas=None,
 <title>DT 3.0 — Mapa de Rota</title>
 
 <!-- Token Mapbox (arquivo local, nunca publicado no GitHub) -->
-<script src="mapbox_config.js"></script>
+<script src="https://felipecard0so.github.io/dt30-mapa/mapbox_config.js"></script>
 
 <!-- Mapbox GL JS -->
 <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet"/>
@@ -2845,6 +2853,8 @@ html,body,#map{{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI'
 /* ── Popup customizado ──────────────────────────── */
 .popup-dt{{font-family:'Segoe UI',sans-serif;font-size:13px;min-width:200px;}}
 .popup-dt b{{color:#1a237e;}}
+.btn-google-maps{{display:inline-block;margin-top:8px;padding:3px 7px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;color:#2563eb;text-decoration:none;font-size:11px;font-weight:600;}}
+.btn-google-maps:hover{{background:#eff6ff;}}
 .popup-status{{margin-top:6px;padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;}}
 .ps-conc{{background:#d4edda;color:#155724;}}
 .ps-impr{{background:#f8d7da;color:#721c24;}}
@@ -3545,11 +3555,18 @@ function criarElAguard() {{
   return el;
 }}
 
-function popupContent(titulo, linhas, statusHtml, btnHtml) {{
+function btnGoogleMaps(lat, lon) {{
+  if (lat === undefined || lon === undefined || lat === null || lon === null) return '';
+  var url = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(lat + ',' + lon);
+  return '<a class="btn-google-maps" href="' + url + '" target="_blank" rel="noopener">↗ Ver no Google Maps</a>';
+}}
+
+function popupContent(titulo, linhas, statusHtml, btnHtml, lat, lon) {{
   var html = '<div class="popup-dt"><b>' + titulo + '</b>';
   linhas.forEach(function(l){{ if(l) html += '<br>' + l; }});
   if(statusHtml) html += statusHtml;
   if(btnHtml) html += btnHtml;
+  html += btnGoogleMaps(lat, lon);
   html += '</div>';
   return html;
 }}
@@ -3594,7 +3611,7 @@ map.on('load', function() {{
     .setLngLat([PARTIDA.lon, PARTIDA.lat])
     .setPopup(new mapboxgl.Popup({{offset:20}}).setHTML(
       popupContent('🚩 Ponto de Partida',
-        ['<b>Cidade:</b> ' + PARTIDA.cidade], null, null)
+        ['<b>Cidade:</b> ' + PARTIDA.cidade], null, null, PARTIDA.lat, PARTIDA.lon)
     ))
     .addTo(map);
 
@@ -3613,7 +3630,7 @@ map.on('load', function() {{
            p.indoor ? '<b style="color:#b91c1c;">⚠️ SITE INDOOR</b>' : '',
            p.hotel ? '<b>Hotel:</b> ' + p.hotel : ''],
           '<div class="popup-status" style="background:#dbeafe;color:#1e40af;">🎯 Próxima atividade</div>',
-          null
+          null, p.lat, p.lon
         )
       );
     }} else {{
@@ -3628,7 +3645,7 @@ map.on('load', function() {{
            p.indoor ? '<b style="color:#b91c1c;">⚠️ SITE INDOOR</b>' : '',
            p.hotel ? '<b>Hotel:</b> ' + p.hotel : ''],
           '<div class="popup-status" style="background:#f5f5f5;color:#555;">🕐 Standby (' + (i+1) + 'ª na fila)</div>',
-          btnHtml
+          btnHtml, p.lat, p.lon
         )
       );
     }}
@@ -3659,7 +3676,7 @@ map.on('load', function() {{
          freqStr(p) ? '<b>Freq:</b> ' + freqStr(p) : '',
          p.concluido ? '<b>Obs:</b> ' + p.concluido : '',
          p.hotel ? '<b>Hotel:</b> ' + p.hotel : ''],
-        statusHtml, null)
+        statusHtml, null, p.lat, p.lon)
     );
     var mk = new mapboxgl.Marker({{element:el, anchor:'center'}})
       .setLngLat([p.lon, p.lat])
@@ -3687,7 +3704,7 @@ map.on('load', function() {{
          freqStr(p) ? '<b>Freq:</b> ' + freqStr(p) : '',
          p.concluido ? '<b>Motivo:</b> ' + p.concluido : '',
          (p.hotel && p.hotel !== '.') ? '<b>Hotel:</b> ' + p.hotel : ''],
-        '<div class="popup-status ps-aguard">⏳ Aguardando para deslocar</div>', null)
+        '<div class="popup-status ps-aguard">⏳ Aguardando para deslocar</div>', null, p.lat, p.lon)
     );
     var mk = new mapboxgl.Marker({{element:el, anchor:'center'}})
       .setLngLat([p.lon, p.lat])
@@ -3744,7 +3761,7 @@ map.on('load', function() {{
          h.tel      ? '<b>Tel:</b> '      + h.tel    : '',
          valorStr   ? '<b>Valor:</b> R$ ' + valorStr : '',
          observacaoStr ? '<b>Observação:</b> ' + observacaoStr : ''],
-        popupExtra, null)
+        popupExtra, null, h.lat, h.lon)
     );
 
     var mk = new mapboxgl.Marker({{element:el, anchor:'center'}})
@@ -4205,7 +4222,7 @@ function mostrarMesAnterior(anoBusca, mesBusca, siteAbrir) {{
           ['<b>Cidade:</b> ' + p.cidade,
            p.tec4g ? '<b>Freq:</b> ' + [p.tec4g,p.tec5g].filter(Boolean).join(' | ') : '',
            p.concluido ? '<b>Obs:</b> ' + p.concluido : ''],
-          statusHtml, null)
+          statusHtml, null, p.lat, p.lon)
       ))
       .addTo(map);
     if (siteAbrir && normBusca(p.id) === siteAbrir && !mkAbrir) {{
@@ -4689,7 +4706,6 @@ function gerarRelatorioPDF() {{
     path = BASE_DIR / "MAPA_ROTAS.html"
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
-    _externalizar_recursos_mapa(path)
     print(f"   Arquivo: {path}")
 
 
@@ -4841,23 +4857,7 @@ def publicar_mapa_github(html_path):
         api_base, headers, "mapbox_config.js", config_js_ofuscado, mensagem
     )
 
-    # ── Publicar recursos separados do mapa ──────────────────
-    ok_recursos = True
-    for remoto, local in (
-        ("css/mapa.css", BASE_DIR / "css" / "mapa.css"),
-        ("js/mapa.js", BASE_DIR / "js" / "mapa.js"),
-    ):
-        try:
-            conteudo = local.read_bytes()
-        except Exception:
-            print(f"   ⚠️  Recurso não encontrado para publicação: {local}")
-            ok_recursos = False
-            continue
-        ok_recursos = _publicar_arquivo_github(
-            api_base, headers, remoto, conteudo, mensagem
-        ) and ok_recursos
-
-    if ok_html and ok_config and ok_recursos:
+    if ok_html and ok_config:
         url_pagina = f"https://{usuario}.github.io/{repo}/MAPA_ROTAS.html"
         print(f"   ✅ Mapa publicado no GitHub!")
         print(f"   🌐 Acesse: {url_pagina}")

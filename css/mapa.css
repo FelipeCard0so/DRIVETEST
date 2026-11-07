@@ -238,6 +238,8 @@ html,body,#map{width:100%;height:100%;margin:0;padding:0;font-family:'Segoe UI',
 /* ── Popup customizado ──────────────────────────── */
 .popup-dt{font-family:'Segoe UI',sans-serif;font-size:13px;min-width:200px;}
 .popup-dt b{color:#1a237e;}
+.btn-google-maps{display:inline-block;margin-top:8px;padding:3px 7px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;color:#2563eb;text-decoration:none;font-size:11px;font-weight:600;}
+.btn-google-maps:hover{background:#eff6ff;}
 .popup-status{margin-top:6px;padding:4px 8px;border-radius:4px;font-weight:600;font-size:12px;}
 .ps-conc{background:#d4edda;color:#155724;}
 .ps-impr{background:#f8d7da;color:#721c24;}
